@@ -253,9 +253,22 @@ fi
 stage "Agent traces (optional)"
 current=$(_existing OTEL_TRACES_ENDPOINT || true)
 if [[ "$current" == *phoenix* ]]; then
-  say "Traces go to Phoenix ($current). Nothing to do here."
+  say "Traces go to Phoenix ($current). Phoenix needs sign-in, so the agents need an API key."
   note "On this machine, open http://localhost:6006. On a VPS, tunnel it first: ssh -L 6006:localhost:6006 <you>@<vps-address>"
-  pause
+  step "Sign in (first time: admin@localhost / admin, then set a new password)."
+  step "Settings > API Keys > System Keys > New key. Copy the key."
+  ask_secret PHOENIX_API_KEY "Paste the Phoenix system API key:" || true
+  if [[ -n "$PHOENIX_API_KEY" ]]; then
+    # An empty POST: 401 means the key is wrong. Any other answer means Phoenix took the key.
+    code=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $PHOENIX_API_KEY" http://127.0.0.1:6006/v1/traces || true)
+    if [[ "$code" == 401 || "$code" == 000 ]]; then
+      warn "Phoenix did not accept the key (HTTP $code). Run this stage again."; SKIPPED+=("Phoenix API key failed the test")
+    else
+      write_env PHOENIX_API_KEY "$PHOENIX_API_KEY"   # kept so a rerun can offer Enter to keep it
+      write_env OTEL_TRACES_HEADERS "Authorization=Bearer $PHOENIX_API_KEY"
+      say "${GREEN}✓${RESET} Phoenix accepted the key. Restart the orchestrator to use it (stage 5 does)."
+    fi
+  fi
 elif confirm "Send agent traces to a self-hosted Langfuse?"; then
   ask LANGFUSE_URL "Langfuse URL as the orchestrator host reaches it, for example http://10.0.0.5:3000:"
   LANGFUSE_URL="${LANGFUSE_URL%/}"
