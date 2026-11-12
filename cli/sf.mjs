@@ -4,6 +4,8 @@
 //   sf new <name> ["<idea>"]             a new project: React Router + TypeScript + Vitest base, agent files,
 //                                        checks, first commit, optional private GitHub repo with factory labels
 //   sf idea "<what you want to build>"   start: grilling, Wayfinder if needed, spec, tickets, factory
+//     --recommended, -r                  grilling takes its own recommended answers and asks you only what it
+//                                        cannot decide. It lists every decision at the end for you to overrule.
 //   sf build "<...>"                     the same as sf idea
 //   sf                                   resume from where the last step stopped
 //   sf status | sf watch                 the tickets and the agents, once or live
@@ -277,7 +279,7 @@ async function watch(st, { skip = new Set(), once = false } = {}) {
 const KIT = new URL("..", import.meta.url).pathname;
 
 /** A factory-ready project: the base the agents build on, with the checks they run, committed and optionally on GitHub. */
-async function newProject(dir, idea) {
+async function newProject(dir, idea, recommended = false) {
   if (!/^[A-Za-z0-9._-]+$/.test(dir ?? "")) die('Give a folder name: sf new <name> ["<idea>"]. Letters, digits, . _ and - only.');
   if (fs.existsSync(dir)) die(`${dir} exists already. sf new starts a fresh project. For an existing one, run sf-kit/init-project.sh.`);
   const run = (what, cmd, args) => {
@@ -322,8 +324,8 @@ async function newProject(dir, idea) {
   } else {
     console.log(c.d(`Later: gh repo create <owner>/${dir} --private --source . --push, then ${KIT}init-project.sh --path . --labels`));
   }
-  if (idea && tryShell("git", ["remote", "get-url", "origin"]) && (await ask("Start the idea now?")) === "y") return startIdea(idea);
-  console.log(`\nNext: ${c.b(`cd ${dir} && sf idea "${idea ?? "<what you want to build>"}"`)}`);
+  if (idea && tryShell("git", ["remote", "get-url", "origin"]) && (await ask("Start the idea now?")) === "y") return startIdea(idea, recommended);
+  console.log(`\nNext: ${c.b(`cd ${dir} && sf idea ${recommended ? "--recommended " : ""}"${idea ?? "<what you want to build>"}"`)}`);
 }
 
 async function preflight() {
@@ -336,6 +338,15 @@ async function preflight() {
   repo();
 }
 
+// --recommended: the grilling decides with its own recommendations and asks only what it cannot decide.
+const RECOMMENDED = `
+
+Recommended mode: for each question you would ask me, take your own recommended answer. State the question and \
+your answer in one line, record it the way the skill says (GLOSSARY.md, an ADR), and go to the next question \
+without waiting for me. Ask me only for what you cannot decide: a fact only I know (users, budget, accounts, \
+names), or a choice that is hard to reverse and has no clear recommendation. At the end, list every decision \
+you took for me, numbered, so I can overrule any of them before I type /exit.`;
+
 async function phaseGrill(st) {
   console.log(`${c.b("Step 1 · Grilling")}  Claude interviews you about the idea with /grill-with-docs.`);
   console.log(c.d("It writes GLOSSARY.md and ADRs as you decide, and judges if the plan needs a Wayfinder map."));
@@ -343,7 +354,7 @@ async function phaseGrill(st) {
   clearMarker("grill");
   const first = !st.grilled;
   const status = claude(first ? ["--session-id", st.session] : ["--resume", st.session],
-    (first ? `/grill-with-docs ${st.idea}` : "Let's continue the grilling.") +
+    (first ? `/grill-with-docs ${st.idea}` : "Let's continue the grilling.") + (st.recommended ? RECOMMENDED : "") +
     tail(marker("grill"), `{"wayfinder": true or false, "why": "<one sentence>"}`,
       "Set wayfinder to true only if settling the open decisions needs more than one agent session. "));
   // Only a session that ran can be resumed. If claude failed to start, the next try starts it fresh.
@@ -353,7 +364,8 @@ async function phaseGrill(st) {
   if (!m && (await ask("The session did not record a result. Is the grilling finished?", "yN")) !== "y") return true;
   const suggest = m?.wayfinder ? "y" : "n";
   console.log(m ? `The agent suggests ${m.wayfinder ? c.b("a Wayfinder map") : c.b("going straight to a spec")}: ${m.why}` : "");
-  const big = await ask("Plan it as a Wayfinder map first?", suggest === "y" ? "Yn" : "yN");
+  // Recommended mode takes the agent's suggestion here too, when it made one.
+  const big = st.recommended && m ? suggest : await ask("Plan it as a Wayfinder map first?", suggest === "y" ? "Yn" : "yN");
   st.phase = big === "y" ? "wayfinder" : "spec"; save(st);
   return true;
 }
@@ -561,16 +573,20 @@ async function run(st) {
 
 // ── commands ─────────────────────────────────────────────────────────────
 const [cmd, ...rest] = process.argv.slice(2);
-async function startIdea(idea) {
+/** Splits --recommended / -r from the idea words. */
+const ideaArgs = (args) => ({ recommended: args.some((a) => a === "--recommended" || a === "-r"),
+  idea: args.filter((a) => a !== "--recommended" && a !== "-r").join(" ").trim() });
+async function startIdea(idea, recommended = false) {
   const old = load();
   if (old && old.phase !== "finished" && (await ask(`An idea is in progress here (step "${old.phase}"). Replace it?`, "yN")) !== "y") process.exit(0);
-  const st = { idea, phase: "grill", session: randomUUID(), started: new Date().toISOString() };
+  const st = { idea, phase: "grill", session: randomUUID(), started: new Date().toISOString(), recommended };
+  if (recommended) console.log(c.d("Recommended mode: the grilling answers its own questions and lists its decisions at the end."));
   save(st); await run(st);
 }
 const need = () => load() ?? die('No idea in progress here. Start one: sf idea "<what you want to build>"');
 switch (cmd) {
-  case "new": await newProject(rest[0], rest.slice(1).join(" ").trim() || undefined); break;
-  case "idea": case "build": await startIdea(rest.join(" ").trim() || die('Give the idea: sf idea "<what you want to build>"')); break;
+  case "new": { const a = ideaArgs(rest.slice(1)); await newProject(rest[0], a.idea || undefined, a.recommended); break; }
+  case "idea": case "build": { const a = ideaArgs(rest); await startIdea(a.idea || die('Give the idea: sf idea [--recommended] "<what you want to build>"'), a.recommended); break; }
   case undefined: case "resume": await run(need()); break;
   case "status": { const st = need(); if (!st.spec) { console.log(`Step "${st.phase}". No spec yet.`); break; } await watch(st, { once: true }); break; }
   case "watch": { const st = need(); if (!st.spec) die("No spec yet."); await watch(st); break; }
@@ -584,5 +600,5 @@ switch (cmd) {
   case "ratchet": await sendEvent("factory/ratchet.requested", "Ratchet run"); break;
   case "rebase": await sendEvent("factory/rebase.sweep", "Rebase sweep"); break;
   case "help": case "-h": case "--help":
-  default: console.log(fs.readFileSync(new URL(import.meta.url), "utf8").split("\n").slice(1, 15).map((l) => l.replace(/^\/\/ ?/, "")).join("\n"));
+  default: console.log(fs.readFileSync(new URL(import.meta.url), "utf8").split("\n").slice(1, 17).map((l) => l.replace(/^\/\/ ?/, "")).join("\n"));
 }

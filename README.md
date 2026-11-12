@@ -85,6 +85,8 @@ While the factory builds, `sf` shows each ticket's status and the agents' last l
 - a prototype is ready to see
 - a run failed
 
+Add `--recommended` (or `-r`) to `sf idea` or `sf new` to answer fewer questions. The grilling then takes its own recommended answer for each question. It asks you only for facts it cannot know and for hard-to-reverse choices with no clear answer. At the end, it lists each decision it made, so you can overrule any of them. `sf` also takes the session's Wayfinder suggestion.
+
 Other commands: `sf new`, `sf status`, `sf watch`, `sf logs <text>`, `sf retro`, `sf architecture`, `sf ratchet` and `sf rebase`.
 
 - **Planning sessions are interactive.** Type `/exit` in Claude to go back to `sf`. Each session writes a small result file in `.sf/`, for example the spec number. If the file is missing, `sf` asks you.
