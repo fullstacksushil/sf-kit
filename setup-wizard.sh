@@ -89,6 +89,16 @@ confirm() {
   [[ "$reply" =~ ^[Yy] ]]
 }
 
+# keep_existing KEY LABEL: when ENV_FILE has KEY, show its last 4 characters and offer to keep it
+# (Enter keeps). Returns success and sets $KEY on keep, failure when there is none or you replace it.
+keep_existing() {
+  local cur reply=""; cur=$(_existing "$1" || true); [[ -n "$cur" ]] || return 1
+  say "A $2 is already saved, ending in ...${cur: -4}."
+  printf '  %s? Keep it? [Y/n] ' "$YELLOW"; read -r reply || true
+  [[ "$reply" =~ ^[Nn] ]] && return 1
+  printf -v "$1" '%s' "$cur"
+}
+
 # _existing KEY: current value of KEY in ENV_FILE, if any, with write_env's single
 # quotes or a plain dotenv double-quoted value undone.
 _existing() {
@@ -217,6 +227,13 @@ write_env GITHUB_REPO "$GITHUB_REPO"
 
 # ── 2 ──────────────────────────────────────────────────────────────────────
 stage "GitHub token (FACTORY_PAT)"
+pat_ok() { [[ "$(GH_TOKEN="$FACTORY_PAT" gh api "repos/$GITHUB_REPO" --jq .permissions.push 2>/dev/null || true)" == true ]]; }
+pat_kept=0
+if keep_existing FACTORY_PAT "GitHub token"; then
+  if pat_ok; then pat_kept=1; say "${GREEN}✓${RESET} the saved token can push to $GITHUB_REPO"
+  else warn "The saved token cannot push to $GITHUB_REPO. A fine-grained token reaches only the repos you picked. Create a new one, or add $GITHUB_REPO to it and paste it again."; fi
+fi
+if (( ! pat_kept )); then
 say "Create a fine-grained token that can reach only $GITHUB_REPO."
 open_url "https://github.com/settings/personal-access-tokens/new"
 step "Token name: factory-${GITHUB_REPO#*/}. Pick an expiry you will remember to renew."
@@ -232,15 +249,18 @@ while :; do
   confirm "Paste it again?" || { SKIPPED+=("FACTORY_PAT failed the write check"); break; }
 done
 write_env FACTORY_PAT "$FACTORY_PAT"
+fi
 
 # ── 3 ──────────────────────────────────────────────────────────────────────
 stage "Claude token (CLAUDE_CODE_OAUTH_TOKEN)"
 say "Runs use your Claude subscription token."
-step "In a second terminal, run: claude setup-token"
-step "Sign in when the browser opens, then copy the token it prints."
-ask_secret CLAUDE_CODE_OAUTH_TOKEN "Paste the token:"
-[[ "$CLAUDE_CODE_OAUTH_TOKEN" == sk-ant-oat* ]] || warn "Subscription tokens usually start with sk-ant-oat. Check the paste."
-write_env CLAUDE_CODE_OAUTH_TOKEN "$CLAUDE_CODE_OAUTH_TOKEN"
+if ! keep_existing CLAUDE_CODE_OAUTH_TOKEN "Claude token"; then
+  step "In a second terminal, run: claude setup-token"
+  step "Sign in when the browser opens, then copy the token it prints."
+  ask_secret CLAUDE_CODE_OAUTH_TOKEN "Paste the token:"
+  [[ "$CLAUDE_CODE_OAUTH_TOKEN" == sk-ant-oat* ]] || warn "Subscription tokens usually start with sk-ant-oat. Check the paste."
+  write_env CLAUDE_CODE_OAUTH_TOKEN "$CLAUDE_CODE_OAUTH_TOKEN"
+fi
 if command -v claude >/dev/null && confirm "Test the token with one short prompt (uses a little of your quota)?"; then
   if out=$(CLAUDE_CODE_OAUTH_TOKEN="$CLAUDE_CODE_OAUTH_TOKEN" claude -p "Reply with the word ok" 2>&1) && [[ "$out" == *ok* ]]; then
     say "${GREEN}✓${RESET} Claude accepted the token"
@@ -255,9 +275,11 @@ current=$(_existing OTEL_TRACES_ENDPOINT || true)
 if [[ "$current" == *phoenix* ]]; then
   say "Traces go to Phoenix ($current). Phoenix needs sign-in, so the agents need an API key."
   note "On this machine, open http://localhost:6006. On a VPS, tunnel it first: ssh -L 6006:localhost:6006 <you>@<vps-address>"
-  step "Sign in (first time: admin@localhost / admin, then set a new password)."
-  step "Settings > API Keys > System Keys > New key. Copy the key."
-  ask_secret PHOENIX_API_KEY "Paste the Phoenix system API key:" || true
+  if ! keep_existing PHOENIX_API_KEY "Phoenix API key"; then
+    step "Sign in (first time: admin@localhost / admin, then set a new password)."
+    step "Settings > API Keys > System Keys > New key. Copy the key."
+    ask_secret PHOENIX_API_KEY "Paste the Phoenix system API key:" || true
+  fi
   if [[ -n "$PHOENIX_API_KEY" ]]; then
     # An empty POST: 401 means the key is wrong. Any other answer means Phoenix took the key.
     code=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $PHOENIX_API_KEY" http://127.0.0.1:6006/v1/traces || true)
