@@ -624,6 +624,11 @@ async function sendEvent(name, what) {
 }
 
 async function run(st) {
+  if (st.phase === "finished") {
+    console.log(`${c.g(`Done: spec #${st.spec} is built.`)} ${c.d(`(${st.idea})`)}`);
+    console.log(`Next idea: ${c.b('sf idea "<what you want to build>"')}  ·  Other runs: ${c.b("sf retro")}, ${c.b("sf architecture")}, ${c.b("sf ratchet")}`);
+    return;
+  }
   await preflight();
   const phases = { grill: phaseGrill, wayfinder: phaseWayfinder, spec: phaseSpec, tickets: phaseTickets, build: phaseBuild, done: phaseDone };
   while (phases[st.phase]) {
