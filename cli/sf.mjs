@@ -347,6 +347,20 @@ without waiting for me. Ask me only for what you cannot decide: a fact only I kn
 names), or a choice that is hard to reverse and has no clear recommendation. At the end, list every decision \
 you took for me, numbered, so I can overrule any of them before I type /exit.`;
 
+/**
+ * The agents clone from GitHub, so the glossary, ADRs and docs the planning sessions wrote must be pushed.
+ * Offers one commit of those paths only. Code changes stay yours to commit.
+ */
+async function pushDocs(what) {
+  const paths = ["GLOSSARY.md", "docs", "CONTEXT.md", "CONTEXT-MAP.md"].filter((p) => fs.existsSync(p));
+  const changed = tryShell("git", ["status", "--porcelain", "--", ...paths])?.trim();
+  if (!changed) return;
+  console.log(`${what} changed these files. The factory's agents read them from GitHub:\n${c.d(changed)}`);
+  if ((await ask("Commit and push them now?")) !== "y") { console.log(c.y("The agents will not see them until you push.")); return; }
+  act("commit the docs", () => { sh("git", ["add", "--", ...paths]); return sh("git", ["commit", "-qm", `docs: ${what.toLowerCase()}`, "--", ...paths]); });
+  act("push", () => sh("git", ["push", "-q"]));
+}
+
 async function phaseGrill(st) {
   console.log(`${c.b("Step 1 · Grilling")}  Claude interviews you about the idea with /grill-with-docs.`);
   console.log(c.d("It writes GLOSSARY.md and ADRs as you decide, and judges if the plan needs a Wayfinder map."));
@@ -362,6 +376,7 @@ async function phaseGrill(st) {
   else { console.log(c.r(`Claude exited with status ${status}.`)); return (await ask("Try the grilling session again?")) === "y"; }
   const m = readMarker("grill");
   if (!m && (await ask("The session did not record a result. Is the grilling finished?", "yN")) !== "y") return true;
+  await pushDocs("The grilling");
   const suggest = m?.wayfinder ? "y" : "n";
   console.log(m ? `The agent suggests ${m.wayfinder ? c.b("a Wayfinder map") : c.b("going straight to a spec")}: ${m.why}` : "");
   // Recommended mode takes the agent's suggestion here too, when it made one.
@@ -389,7 +404,7 @@ async function phaseWayfinder(st) {
     });
     console.log(`\n${c.b(`Wayfinder map #${st.map}`)}  ${kids.length - open.length}/${kids.length} decisions made`);
     for (const r of rows) console.log(`  #${String(r.k.number).padEnd(5)} ${r.type.padEnd(10)} ${r.blocked.length ? c.d(`waiting on ${r.blocked.map((b) => `#${b}`).join(", ")}`) : r.claimed ? c.y("claimed") : c.c("ready")}  ${r.k.title}`);
-    if (!open.length) { console.log(c.g("The map is clear: every decision is made.")); st.phase = "spec"; save(st); return true; }
+    if (!open.length) { console.log(c.g("The map is clear: every decision is made.")); await pushDocs("The Wayfinder map"); st.phase = "spec"; save(st); return true; }
     const frontier = rows.filter((r) => !r.blocked.length && !r.claimed);
     if (!frontier.length) {
       const a = await ask("No unclaimed ticket is ready. [r]efresh, [w]ork a claimed one, or [q]uit?", "Rwq");
