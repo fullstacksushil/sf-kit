@@ -317,8 +317,6 @@ async function newProject(dir, idea, recommended = false) {
   edit("AGENTS.md", [
     ["<!-- CHANGEME: list the checks that npm run check chains (format, lint, types, boundaries, tests). -->",
       "`npm run check` runs `typecheck` (React Router typegen, then `tsc`), then `test` (Vitest). `npm run build` must pass too."],
-    // This base has no pre-commit hook, so the template's hook rule would mislead the agents.
-    [/The pre-commit hook refuses[^\n]*\n\n/, ""],
     ["| <!-- CHANGEME --> | |", "| `+types` imports fail | Run `npm run typecheck`. It generates the route types first. |"],
   ]);
   edit("GLOSSARY.md", [["<!-- CHANGEME: product name -->", dir]]);
@@ -367,17 +365,42 @@ names), or a choice that is hard to reverse and has no clear recommendation. At 
 you took for me, numbered, so I can overrule any of them before I type /exit.`;
 
 /**
- * The agents clone from GitHub, so the glossary, ADRs and docs the planning sessions wrote must be pushed.
- * Offers one commit of those paths only. Code changes stay yours to commit.
+ * The agents clone from GitHub, so the glossary, standards, ADRs and docs the planning sessions wrote must be on
+ * GitHub before the factory starts. True when they are. Commits only those paths: code changes stay yours.
+ * Pulls before it pushes, so docs the factory merged meanwhile (its PRs update the glossary too) come in first.
  */
-async function pushDocs(what) {
-  const paths = ["GLOSSARY.md", "docs", "CONTEXT.md", "CONTEXT-MAP.md"].filter((p) => fs.existsSync(p));
+const DOC_PATHS = ["GLOSSARY.md", "CODING_STANDARDS.md", "docs", "CONTEXT.md", "CONTEXT-MAP.md"];
+async function docsOnGitHub(what) {
+  const paths = DOC_PATHS.filter((p) => fs.existsSync(p));
   const changed = tryShell("git", ["status", "--porcelain", "--", ...paths])?.trim();
-  if (!changed) return;
-  console.log(`${what} changed these files. The factory's agents read them from GitHub:\n${c.d(changed)}`);
-  if ((await ask("Commit and push them now?")) !== "y") { console.log(c.y("The agents will not see them until you push.")); return; }
-  act("commit the docs", () => { sh("git", ["add", "--", ...paths]); return sh("git", ["commit", "-qm", `docs: ${what.toLowerCase()}`, "--", ...paths]); });
-  act("push", () => sh("git", ["push", "-q"]));
+  if (changed) {
+    console.log(`${what} changed these files. The factory's agents read them from GitHub:\n${c.d(changed)}`);
+    if ((await ask("Commit them now?")) !== "y") { console.log(c.y("The agents will not see them until you commit and push.")); return false; }
+    // Only paths git tracks after the add: an empty docs/ folder is not one, and would fail the commit.
+    if (!act("commit the docs", () => {
+      sh("git", ["add", "--", ...paths]);
+      const tracked = paths.filter((p) => sh("git", ["ls-files", "--", p]).trim());
+      return sh("git", ["commit", "-qm", `docs: ${what.toLowerCase()}`, "--", ...tracked]);
+    })) return false;
+  }
+  if (tryShell("git", ["rev-parse", "--abbrev-ref", "@{u}"]) === null) {
+    console.log(c.y("This branch has no upstream on GitHub. Push it once: git push -u origin HEAD")); return false;
+  }
+  if (!act("fetch", () => sh("git", ["fetch", "-q"]))) return false;
+  if (Number(sh("git", ["rev-list", "--count", "HEAD..@{u}"])) > 0) {
+    console.log(c.d("GitHub has newer commits. Pulling them first."));
+    if (tryShell("git", ["pull", "--rebase", "--autostash", "-q"]) === null) {
+      tryShell("git", ["rebase", "--abort"]);
+      console.log(c.y("Your commits conflict with GitHub (often GLOSSARY.md: the factory's PRs add terms too)."));
+      console.log(c.y("Run git pull, merge the files by hand, commit, then run sf again."));
+      return false;
+    }
+  }
+  const unpushed = tryShell("git", ["diff", "--name-only", "@{u}", "HEAD", "--", ...paths])?.trim();
+  if (!unpushed) return true;
+  console.log(`Not on GitHub yet:\n${c.d(unpushed)}\nCommits to push:\n${c.d(sh("git", ["log", "--oneline", "@{u}..HEAD"]).trim())}`);
+  if ((await ask("Push them now?")) !== "y") { console.log(c.y("The agents will not see them until you push.")); return false; }
+  return act("push", () => sh("git", ["push", "-q"]));
 }
 
 async function phaseGrill(st) {
@@ -395,7 +418,7 @@ async function phaseGrill(st) {
   else { console.log(c.r(`Claude exited with status ${status}.`)); return (await ask("Try the grilling session again?")) === "y"; }
   const m = readMarker("grill");
   if (!m && (await ask("The session did not record a result. Is the grilling finished?", "yN")) !== "y") return true;
-  await pushDocs("The grilling");
+  await docsOnGitHub("The grilling");
   const suggest = m?.wayfinder ? "y" : "n";
   console.log(m ? `The agent suggests ${m.wayfinder ? c.b("a Wayfinder map") : c.b("going straight to a spec")}: ${m.why}` : "");
   // Recommended mode takes the agent's suggestion here too, when it made one.
@@ -423,7 +446,7 @@ async function phaseWayfinder(st) {
     });
     console.log(`\n${c.b(`Wayfinder map #${st.map}`)}  ${kids.length - open.length}/${kids.length} decisions made`);
     for (const r of rows) console.log(`  #${String(r.k.number).padEnd(5)} ${r.type.padEnd(10)} ${r.blocked.length ? c.d(`waiting on ${r.blocked.map((b) => `#${b}`).join(", ")}`) : r.claimed ? c.y("claimed") : c.c("ready")}  ${r.k.title}`);
-    if (!open.length) { console.log(c.g("The map is clear: every decision is made.")); await pushDocs("The Wayfinder map"); st.phase = "spec"; save(st); return true; }
+    if (!open.length) { console.log(c.g("The map is clear: every decision is made.")); await docsOnGitHub("The Wayfinder map"); st.phase = "spec"; save(st); return true; }
     const frontier = rows.filter((r) => !r.blocked.length && !r.claimed);
     if (!frontier.length) {
       const a = await ask("No unclaimed ticket is ready. [r]efresh, [w]ork a claimed one, or [q]uit?", "Rwq");
@@ -484,6 +507,8 @@ async function phaseBuild(st) {
     console.log(c.d("Set it up with sf-kit/init-host.sh and sf-kit/setup-wizard.sh. Without a public webhook URL, set GITHUB_POLL=1 in /etc/factory/orchestrator.env."));
     if ((await ask("Continue anyway (labels wait until the factory runs)?", "yN")) !== "y") return false;
   }
+  // The gate before any label: an agent that clones without the planning docs builds on guesses.
+  if (!(await docsOnGitHub("Planning"))) { console.log(c.y("The factory starts when the docs are on GitHub. Run sf again then.")); return false; }
   const skip = new Set();
   if (st.mode === "spec" && !st.nightShiftStarted) {
     if ((await ask(`Start the night shift on spec #${st.spec} (label agent:implement-spec)?`)) !== "y") return false;
@@ -569,6 +594,9 @@ async function phaseBuild(st) {
 
 async function phaseDone(st) {
   console.log(c.g(c.b(`\nSpec #${st.spec} is built: every ticket is closed.`)));
+  const spec = tryShell("gh", ["issue", "view", String(st.spec), "-R", repo(), "--json", "state", "--jq", ".state"])?.trim();
+  if (spec === "OPEN" && (await ask(`Close spec #${st.spec} on GitHub?`)) === "y")
+    act(`close spec #${st.spec}`, () => gh("issue", "close", String(st.spec), "-R", repo(), "--reason", "completed", "--comment", "Every ticket is closed. Closed by sf."));
   console.log("Suggested next steps from the course. Each one asks first.");
   if ((await ask("Run /retro on this work? It lists findings only, and you choose which to apply.")) === "y") retro();
   await architecture();

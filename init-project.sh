@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Make a project factory ready: agent guide files, the course's skills and agent scripts,
-# and (for an existing project) a "state of the repo" report. Never overwrites a file.
+# and (for an existing project) a "state of the repo" report. Never overwrites a file. It adds one
+# package.json script (prepare, to turn on the pre-commit hook) when the project has none.
 # Then follow ../playbooks/01-greenfield.md (new) or ../playbooks/02-brownfield.md (existing).
 set -euo pipefail
 
@@ -87,6 +88,47 @@ if git -C "$COURSE" rev-parse --verify "$COURSE_REF" >/dev/null 2>&1; then
   sed -i '/^   - `blocked`: waiting on something outside this repository/a\
    - `prototype-needed`: the open question is how it should look or behave, and people should react to a rough prototype before anyone decides. The factory builds one and posts screenshots.' \
     "$tmp/.sandcastle/agent-workflows/explore/prompt.md"
+  # The course's hook lives in .husky/ and scripts/pre-commit.sh. sf-kit's is .githooks/pre-commit, with
+  # scripts/check-file-tokens.mjs (both from project-template/).
+  wf="$tmp/.sandcastle/agent-workflows"
+  sed -i 's#`.husky/`, `scripts/pre-commit.sh`#`.githooks/`, `scripts/check-file-tokens.mjs`#' "$wf/implement/prompt.md" "$wf/implement-spec/build-prompt.md"
+  sed -i 's#scripts/check-file-tokens\.js#scripts/check-file-tokens.mjs#' "$wf/review/prompt.md"
+  # The docs loop: the factory updates the glossary, the standards and the ADRs in the PRs it builds and reviews.
+  for f in "$wf/implement/prompt.md" "$wf/implement-spec/build-prompt.md"; do cat >> "$f" <<'DOCS'
+
+## Docs change with the code
+
+- /tmp/ticket.md ends with the parent spec when the ticket has one. Its
+  implementation decisions bind you as much as the ticket does.
+- GLOSSARY.md names domain concepts: types, exported names, UI text and test
+  names. Local variables follow the surrounding code. A new domain concept
+  gets its term in GLOSSARY.md in the same commit.
+- A decision that the code cannot explain and that is hard to reverse gets an
+  ADR in docs/adr/.
+DOCS
+  done
+  cat >> "$wf/review/prompt.md" <<'DOCS'
+
+## Docs change with the code
+
+/tmp/review-spec.md ends with the parent spec when the ticket has one. On the
+Spec axis, check the change against the spec's implementation decisions too.
+
+GLOSSARY.md names domain concepts: types, exported names, UI text and test
+names. Do not rename local variables or test helpers for the glossary. When
+the PR uses a domain concept that GLOSSARY.md lacks, add the term in a fix
+commit.
+
+For each rule you wanted and could not find:
+
+- A judgement call that no lint or test can check: add it to
+  CODING_STANDARDS.md in its own commit, in the format the file describes.
+  Then fix the change to follow it. The person who merges approves the rule.
+- A rule that a check could enforce: do not add it. Name the check to add.
+
+List both kinds under "Rules this review wanted and could not find", and say
+which ones you added to CODING_STANDARDS.md.
+DOCS
   rm -f "$tmp/.agents/skills/.gitkeep"
   place_tree "$tmp/.agents" "$TARGET/.agents"
   place_tree "$tmp/.sandcastle" "$TARGET/.sandcastle"
@@ -97,6 +139,21 @@ if git -C "$COURSE" rev-parse --verify "$COURSE_REF" >/dev/null 2>&1; then
   fi
 else
   echo "Skipped: no $COURSE_REF in $COURSE. Run: git -C <course-repo> fetch origin live-run-through"
+fi
+
+# Turn on .githooks/pre-commit at npm install, in this clone and in every agent clone (their setup runs npm ci).
+# Only with a check script for the hook to run, and only when the project has no hook setup of its own.
+if [ -f package.json ] && [ ! -d .husky ]; then
+  say "Pre-commit hook"
+  hook=$(node -e 'const s=require("./package.json").scripts||{};console.log(s.prepare?"has-prepare":s.check?"ok":"no-check")')
+  case "$hook" in
+    ok) CREATED+=("$TARGET/package.json (scripts.prepare: git config core.hooksPath .githooks)")
+        [ "$DRY" = 1 ] || { node -e 'const fs=require("fs");const p=JSON.parse(fs.readFileSync("package.json","utf8"));p.scripts.prepare="git config core.hooksPath .githooks || true";fs.writeFileSync("package.json",JSON.stringify(p,null,2)+"\n")'
+          git config core.hooksPath .githooks; }
+        echo "hook on: .githooks/pre-commit" ;;
+    has-prepare) echo "package.json has a prepare script. Add to it: git config core.hooksPath .githooks" ;;
+    *) echo "No check script in package.json, so the hook stays off. Add one, then set prepare to: git config core.hooksPath .githooks" ;;
+  esac
 fi
 
 if [ "$MODE" = existing ]; then

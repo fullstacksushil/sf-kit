@@ -25,7 +25,7 @@ flowchart LR
 | `init-project.sh` | Makes a project ready for the factory. It adds the agent guide files, the tracker doc, the skills and the agent scripts. It never overwrites a file. |
 | `orchestrator/` | The Node app. It turns GitHub events into Inngest events. Its functions run the agent tasks in Docker. |
 | `host/` | The compose file, the runner Dockerfile, the Caddyfile and the systemd unit. `init-host.sh` installs them. |
-| `project-template/` | The files `init-project.sh` copies: `AGENTS.md`, `GLOSSARY.md`, `CODING_STANDARDS.md`, the tracker doc and the PR template. |
+| `project-template/` | The files `init-project.sh` copies: `AGENTS.md`, `GLOSSARY.md`, `CODING_STANDARDS.md`, the tracker doc, the PR template, the pre-commit hook (`.githooks/pre-commit`, with `scripts/check-file-tokens.mjs`) and a CI workflow (`.github/workflows/check.yml`). `npm install` turns the hook on, in your clone and in each agent's clone. |
 
 ## Install
 
@@ -75,8 +75,10 @@ flowchart TD
 | 2. Wayfinder (optional) | You and Claude | `/wayfinder` makes a map of decision tickets. `sf` opens a fresh session for each ready ticket until the map is clear. |
 | 3. Spec | You and Claude | `/to-spec` publishes the spec issue with the label `spec`. |
 | 4. Tickets | You and Claude | `/to-tickets` publishes sub-issues of the spec with blocking edges. You approve the split. |
-| 5. Build | The factory | Explore mode labels each ready ticket `agent:explore`, and each ticket gets its own PR. Night shift mode labels the spec `agent:implement-spec`, and you get one PR. |
-| 6. Done | You and Claude | `sf` suggests `/retro`, an architecture review and a lint ratchet run. Each one asks first. |
+| 5. Build | The factory | First `sf` checks that `GLOSSARY.md`, `CODING_STANDARDS.md` and `docs/` are committed and on GitHub. The agents clone from there. `sf` pulls before it pushes, and it stops on a conflict. Then explore mode labels each ready ticket `agent:explore`, and each ticket gets its own PR. Night shift mode labels the spec `agent:implement-spec`, and you get one PR. |
+| 6. Done | You and Claude | `sf` offers to close the spec. It suggests `/retro`, an architecture review and a lint ratchet run. Each one asks first. |
+
+The docs change with the code. Each ticket the agents get ends with its parent spec, so the spec's decisions reach the implementer and the reviewer. The implementer adds a new domain term to `GLOSSARY.md` in its PR. The reviewer adds each judgement rule it wanted to `CODING_STANDARDS.md` on the PR branch. You approve both when you merge.
 
 While the factory builds, `sf` shows each ticket's status and the agents' last log lines. It stops when:
 

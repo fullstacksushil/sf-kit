@@ -56,6 +56,22 @@ export const ticketScript = (n: number, file = "/tmp/ticket.md") => `
     | jq -r '"# " + .title + "\\n\\n" + .body + (if (.comments|length) > 0 then "\\n\\n## Comments\\n"
           + ([.comments[] | "\\n### " + .author.login + "\\n\\n" + .body + "\\n"] | join("")) else "" end)' \\
     > ${file}
+  ${parentSpecScript(String(issueNumber(n)), file)}
+`;
+
+/**
+ * Appends the ticket's parent spec (its GitHub sub-issue parent) to a file. The spec's implementation decisions
+ * bind every ticket, and the tickets do not repeat them. `issue` is a number or a shell variable such as "$issue".
+ * A 404 means the issue has no parent. The endpoint was checked on 2026-11-12:
+ * https://docs.github.com/rest/issues/sub-issues#get-parent-issue
+ */
+export const parentSpecScript = (issue: string, file: string) => `
+  parent=$(gh api repos/${owner}/${repo}/issues/${issue}/parent --jq .number 2>/dev/null || true)
+  case "$parent" in ''|*[!0-9]*) ;; *)
+    gh issue view "$parent" --repo ${owner}/${repo} --json number,title,body \\
+      --jq '"\\n\\n## Parent spec #" + (.number|tostring) + ": " + .title
+            + "\\n\\nThis ticket builds part of this spec. Its decisions bind the ticket.\\n\\n" + .body' >> ${file} ;;
+  esac
 `;
 
 /**
@@ -198,10 +214,12 @@ export async function runAgent(step: Step, runId: string, prepare: string | null
  * Shell helpers for token steps that read files the agent wrote in /tmp. A symlink to /proc/self/environ
  * would hand the token to gh as an attachment or a body, so only plain files whose real path is in /tmp count.
  * agent_file <path>: true for a non-empty plain file under /tmp. $attach: --attach flags for /tmp/evidence/*.png.
+ * attach_for <paths...>: sets $attach for other paths, for example one issue's screenshots.
  */
 export const agentFiles = `
   agent_file() { [ -f "$1" ] && [ -s "$1" ] && case "$(realpath -e "$1")" in /tmp/*) true ;; *) false ;; esac; }
-  shopt -s nullglob; attach=(); for p in /tmp/evidence/*.png; do agent_file "$p" && attach+=(--attach "$p"); done; shopt -u nullglob
+  attach_for() { attach=(); local p; for p in "$@"; do agent_file "$p" && attach+=(--attach "$p"); done; return 0; }
+  shopt -s nullglob; attach_for /tmp/evidence/*.png; shopt -u nullglob
 `;
 
 export const statusTag = " <!-- factory:status -->";

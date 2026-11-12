@@ -1,7 +1,7 @@
 import { NonRetriableError } from "inngest";
 import { inngest } from "../inngest.ts";
 import * as docker from "../docker.ts";
-import { agentFiles, cloneScript, gh, ghToken, issueNumber, owner, pushCommits, repo, prRefusal, resetOnFailure, runAgent, safeRef, statusTag } from "../run.ts";
+import { agentFiles, cloneScript, gh, ghToken, issueNumber, owner, parentSpecScript, pushCommits, repo, prRefusal, resetOnFailure, runAgent, safeRef, statusTag } from "../run.ts";
 
 // The spec is whatever issue the PR body says it closes, the same rule as the course's review workflow.
 const specScript = (pr: number) => `
@@ -10,6 +10,7 @@ const specScript = (pr: number) => `
   if [ -n "$issue" ]; then
     gh issue view "$issue" --repo ${owner}/${repo} --json number,title,body \\
       --jq '"# Ticket #" + (.number|tostring) + ": " + .title + "\\n\\n" + .body' > /tmp/review-spec.md
+    ${parentSpecScript('"$issue"', "/tmp/review-spec.md")}
   else
     echo "No spec available: this PR does not say which ticket it closes." > /tmp/review-spec.md
   fi

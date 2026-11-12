@@ -1,6 +1,6 @@
 import { inngest } from "../inngest.ts";
 import * as docker from "../docker.ts";
-import { cloneScript, gh, ghToken, owner, repo, runAgent, statusTag } from "../run.ts";
+import { agentFiles, cloneScript, gh, ghToken, owner, repo, runAgent, statusTag } from "../run.ts";
 
 // The course's agent-explore.yml as one Inngest function. The agent reads every open
 // `agent:explore` issue as one batch and returns a plan. It holds no GitHub token.
@@ -81,7 +81,17 @@ export const exploreBatch = inngest.createFunction(
             : `Stopped at \`${e.tag}\`. Settle the open questions, then label \`agent:implement\` yourself.`;
           // Not tagged factory:status: the implementer needs to read these findings. The marker stops the footer's
           // "@factory" from counting as prototype feedback.
-          await gh.issues.createComment({ owner, repo, issue_number: e.number, body: `${e.comment}\n\n---\n\n_${next}_ Inngest run ${runId}.\n<!-- factory:findings -->` });
+          // gh in a container, so the issue's screenshots (/tmp/evidence/<n>-*.png) upload with the comment, the same
+          // way implement, review and prototype post theirs. The agent's text goes from the plan file to the body file.
+          const footer = Buffer.from(`\n\n---\n\n_${next}_ Inngest run ${runId}.\n<!-- factory:findings -->\n`).toString("base64");
+          await docker.oneShot(runId, `
+            cd /${agentFiles}
+            agent_file /tmp/plan.json || { echo "/tmp/plan.json is not a plain file in /tmp." >&2; exit 1; }
+            jq -r --argjson n ${Number(e.number)} '.issues[] | select(.number == $n) | .comment' /tmp/plan.json > "$HOME/comment.md"
+            printf '%s' '${footer}' | base64 -d >> "$HOME/comment.md"
+            shopt -s nullglob; attach_for /tmp/evidence/${Number(e.number)}-*.png; shopt -u nullglob
+            gh issue comment ${Number(e.number)} --repo ${owner}/${repo} --body-file "$HOME/comment.md" "\${attach[@]}"
+          `, ghToken());
           await gh.issues.removeLabel({ owner, repo, issue_number: e.number, name: "agent:in-progress" }).catch(() => {});
           if (e.duplicate_of != null) await gh.issues.update({ owner, repo, issue_number: e.number, state: "closed", state_reason: "duplicate" });
           // A label added with the PAT fires the webhook, which starts implement-ticket. That is the chain.
