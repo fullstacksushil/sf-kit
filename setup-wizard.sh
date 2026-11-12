@@ -254,7 +254,7 @@ stage "Agent traces (optional)"
 current=$(_existing OTEL_TRACES_ENDPOINT || true)
 if [[ "$current" == *phoenix* ]]; then
   say "Traces go to Phoenix ($current). Nothing to do here."
-  note "Open it over SSH: ssh -L 6006:localhost:6006 <host>, then http://localhost:6006"
+  note "On this machine, open http://localhost:6006. On a VPS, tunnel it first: ssh -L 6006:localhost:6006 <you>@<vps-address>"
   pause
 elif confirm "Send agent traces to a self-hosted Langfuse?"; then
   ask LANGFUSE_URL "Langfuse URL as the orchestrator host reaches it, for example http://10.0.0.5:3000:"

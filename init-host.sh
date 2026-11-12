@@ -158,6 +158,7 @@ cat <<EOF
    the repo, the GitHub token, the Claude token, optional Langfuse keys, the firewall rule
    for port 3000, starting the orchestrator, and the GitHub webhook.
    Without the firewall rule, Inngest logs "dial tcp 172.17.0.1:3000: i/o timeout" and no run starts.
-3. Dashboards over SSH: ssh -L 8288:localhost:8288 -L 6006:localhost:6006 <host>
+3. Dashboards: on this machine, open http://localhost:8288 (Inngest) and http://localhost:6006 (Phoenix).
+   On a VPS, tunnel them first: ssh -L 8288:localhost:8288 -L 6006:localhost:6006 <you>@<vps-address>
 4. Test: add agent:implement to a small issue. Then run the checks in playbooks/04, "Checks for Option B".
 EOF
