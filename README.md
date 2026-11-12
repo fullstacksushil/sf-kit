@@ -80,6 +80,8 @@ flowchart TD
 
 The docs change with the code. Each ticket the agents get ends with its parent spec, so the spec's decisions reach the implementer and the reviewer. The implementer adds a new domain term to `GLOSSARY.md` in its PR. The reviewer adds each judgement rule it wanted to `CODING_STANDARDS.md` on the PR branch. You approve both when you merge.
 
+`sf` also shows open issues from outside its spec that carry a factory label. When no idea is in progress, run `sf` to see only these issues. `ready-for-agent` marks an issue as ready, but it starts no run. `sf` offers each such issue to the factory and adds `agent:explore` when you say yes.
+
 While the factory builds, `sf` shows each ticket's status and the agents' last log lines. It stops when:
 
 - a PR is ready to merge

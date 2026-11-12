@@ -155,13 +155,19 @@ function nativeBlockers(n) {
  * so no ticket is offered to explore, and one extra row tracks the spec's integration PR.
  */
 function tickets(spec, mode = "explore") {
-  let list = subIssues(spec);
-  if (!list.length) {
+  let list = spec ? subIssues(spec) : [];
+  if (spec && !list.length) {
     // No sub-issues: fall back to issues whose body names the spec as parent.
     list = JSON.parse(gh("issue", "list", "-R", repo(), "--state", "all", "--limit", "200", "--search", `"#${spec}" in:body`, "--json", "number,title,state,body,labels,assignees"))
       .filter((i) => i.number !== spec && /##\s*Parent[\s\S]{0,200}#/.test(i.body ?? "") && new RegExp(`#${spec}\\b`).test(i.body ?? ""));
   }
   const prs = JSON.parse(gh("pr", "list", "-R", repo(), "--state", "open", "--limit", "100", "--json", "number,title,body,isDraft,labels,url"));
+  // Issues filed or labelled on GitHub outside this spec, so sf shows all the factory's work in the repo.
+  const inSpec = new Set([spec, ...list.map((i) => i.number)]);
+  const others = JSON.parse(gh("issue", "list", "-R", repo(), "--state", "open", "--limit", "200", "--json", "number,title,state,body,labels,url"))
+    .filter((i) => !inSpec.has(i.number) && labels(i).some((l) => OTHER_LABELS.has(l)) && !labels(i).some((l) => l === "spec" || l.startsWith("wayfinder:")))
+    .map((i) => ({ ...i, other: true }));
+  list = [...list, ...others];
   const byNum = new Map(list.map((i) => [i.number, i]));
   // A blocker outside the spec. A missing one (a typo in "Blocked by") counts as open, so the ticket waits.
   const outsideOpen = (b) => { try { return isOpen(issue(b)); } catch (e) { if (/HTTP 40[34]|HTTP 410/.test(String(e.stderr ?? e.message))) return true; throw e; } };
@@ -186,10 +192,12 @@ function tickets(spec, mode = "explore") {
     else if (ls.includes("agent:explore")) status = "queued-explore";
     else if (ls.includes("agent:implement")) status = "queued-implement";
     else if (openBlockers.length) status = "waiting";
+    // An issue outside the spec is offered to the factory only when someone marked it ready-for-agent.
+    else if (i.other) status = ls.includes("ready-for-agent") ? "frontier" : "needs-you";
     else status = mode === "spec" ? "night-shift" : "frontier";
-    return { number: i.number, title: i.title, status, blockedBy, openBlockers, pr, url: i.html_url ?? `https://github.com/${repo()}/issues/${i.number}` };
-  }).sort((a, b) => a.number - b.number);
-  if (mode !== "spec") return rows;
+    return { number: i.number, title: i.title, status, blockedBy, openBlockers, pr, other: Boolean(i.other), url: i.url ?? i.html_url ?? `https://github.com/${repo()}/issues/${i.number}` };
+  }).sort((a, b) => Number(a.other) - Number(b.other) || a.number - b.number);
+  if (mode !== "spec" || !spec) return rows;
   // The night shift's one PR, spec/<n> -> main. Done when it merges, because its "Closes #<spec>" closes the spec.
   const sp = prs.find((p) => p.body?.includes(`Implements spec #${spec}.`));
   const spLabels = sp ? sp.labels.map((l) => l.name) : [];
@@ -202,6 +210,11 @@ function tickets(spec, mode = "explore") {
     url: `https://github.com/${repo()}/issues/${spec}` });
   return rows;
 }
+
+/** Labels that make an issue outside the spec part of the factory's work. */
+const OTHER_LABELS = new Set(["ready-for-agent", "agent:explore", "agent:implement", "agent:prototype", "agent:in-progress", "agent:blocked", "needs-a-human", "prototype"]);
+/** The spec's own tickets. Issues from outside the spec never hold the spec open. */
+const specRows = (list) => list.filter((t) => !t.other);
 
 // [text, colour]. Padding happens before colouring, because escape codes break padEnd.
 const STATUS = {
@@ -235,15 +248,23 @@ function render(st, list, ags) {
   const w = Math.max(60, process.stdout.columns ?? 100);
   const cut = (s, n = w - 4) => (s.length > n ? s.slice(0, n - 1) + "…" : s);
   const out = [];
-  out.push(c.b(`sf · ${repo()}`) + c.d(`  ·  spec #${st.spec}  ·  Inngest ${INNGEST}  ·  ${new Date().toLocaleTimeString()}`));
-  out.push(c.d(cut(`idea: ${st.idea}`)));
+  out.push(c.b(`sf · ${repo()}`) + c.d(`${st.spec ? `  ·  spec #${st.spec}` : ""}  ·  Inngest ${INNGEST}  ·  ${new Date().toLocaleTimeString()}`));
+  if (st.idea) out.push(c.d(cut(`idea: ${st.idea}`)));
   out.push("");
-  const real = list.filter((t) => !t.specRow), done = real.filter((t) => t.status === "done").length;
-  out.push(c.b(`Tickets ${done}/${real.length} done`) + c.d(st.mode === "spec" ? "  ·  night shift: the factory builds them into one PR" : ""));
-  for (const t of list) {
+  const row = (t) => {
     const extra = t.status === "waiting" ? c.d(` blocked by ${t.openBlockers.map((b) => `#${b}`).join(", ")}`) : t.pr ? c.d(` PR #${t.pr.number}`) : "";
     out.push(`  ${(t.specRow ? "spec" : `#${t.number}`).padEnd(6)} ${statusCell(t.status)} ${cut(t.title, w - 50)}${extra}`);
+  };
+  if (st.spec) {
+    const own = specRows(list), real = own.filter((t) => !t.specRow), done = real.filter((t) => t.status === "done").length;
+    out.push(c.b(`Tickets ${done}/${real.length} done`) + c.d(st.mode === "spec" ? "  ·  night shift: the factory builds them into one PR" : ""));
+    own.forEach(row);
+    out.push("");
   }
+  const others = list.filter((t) => t.other);
+  out.push(c.b(`Other issues ${others.length}`) + c.d("  ·  open issues with a factory label, outside any spec sf runs"));
+  if (!others.length) out.push(c.d("  none. Label an issue ready-for-agent on GitHub, and sf offers it to the factory."));
+  others.forEach(row);
   out.push("");
   if (ags === null) out.push(c.d("Agents: no docker access on this machine. Open the Inngest dashboard for runs."));
   else if (!ags.length) out.push(c.d("Agents: none running."));
@@ -282,7 +303,7 @@ async function watch(st, { skip = new Set(), once = false } = {}) {
       if (once) return list;
       const gates = list.filter((t) => GATES.has(t.status) && !skip.has(`${t.number}:${t.status}`));
       const frontier = list.filter((t) => t.status === "frontier" && !skip.has(`${t.number}:frontier`));
-      const finished = list.length > 0 && list.every((t) => t.status === "done");
+      const own = specRows(list), finished = Boolean(st.spec) && own.length > 0 && own.every((t) => t.status === "done");
       if (gates.length || frontier.length || finished) { if (tty) process.stdout.write("\x07"); return list; }
       console.log(c.d("\nWatching. sf stops here when something needs you. Press q to go back to the menu."));
       for (let i = 0; i < 20 && !quit; i++) await new Promise((r) => setTimeout(r, 500)); // refresh every 10 s
@@ -516,13 +537,15 @@ async function phaseBuild(st) {
   }
   for (;;) {
     const list = await watch(st, { skip });
-    if (list.length && list.every((t) => t.status === "done")) { st.phase = "done"; save(st); return true; }
+    const own = specRows(list);
+    if (st.spec && own.length && own.every((t) => t.status === "done")) { st.phase = "done"; save(st); return true; }
     let acted = false;
 
     const frontier = list.filter((t) => t.status === "frontier" && !skip.has(`${t.number}:frontier`));
     if (frontier.length) {
       console.log(`\n${c.b("Ready to start:")} ${frontier.map((t) => `#${t.number} ${t.title}`).join(" · ")}`);
       console.log(c.d("The factory explores each one first. Easy calls go on to implement and review. The rest come back to you."));
+      if (frontier.some((t) => t.other)) console.log(c.d("ready-for-agent alone starts nothing. sf adds agent:explore, which starts the run."));
       const a = await ask(`Send ${frontier.length} ticket(s) to the factory with agent:explore? [y]es, [p]ick, [n]ot now, [q]uit`, "Ypnq");
       if (a === "q") return false;
       const ready = frontier.map((t) => t.number);
@@ -547,7 +570,8 @@ async function phaseBuild(st) {
         else skip.add(`${t.number}:${t.status}`);
       } else if (t.status === "needs-you") {
         console.log(`${c.b(`#${t.number} needs you`)}: ${t.title}\n  ${t.url}`);
-        console.log(c.d("  Explore found open questions. Its comment on the ticket lists them."));
+        console.log(c.d(labels(issue(t.number)).includes("needs-a-human") ? "  Explore found open questions. Its comment on the ticket lists them."
+          : "  It has a factory label but no run. Implement it, or settle it in a session first."));
         const a = await ask("[g]rill it in a session, [p]rototype it first, [i]mplement anyway, [s]kip", "gpiS");
         if (a === "p") { act(`label #${t.number}`, () => gh("issue", "edit", String(t.number), "-R", repo(), "--remove-label", "needs-a-human", "--add-label", "agent:prototype")); acted = true; continue; }
         if (a === "g") {
@@ -559,11 +583,12 @@ async function phaseBuild(st) {
         console.log(`${c.b(`#${t.number} has a prototype for you`)}: ${t.title}\n  ${t.url}`);
         console.log(c.d("  Its newest comment has screenshots. Reply on the issue with @factory and feedback to get the next version."));
         // In spec mode the night shift builds every ticket, so a separate implement run would build it twice.
-        const build = st.mode === "spec" ? "[i] let the night shift build it (the prototype is the spec)" : "[i]mplement it now (the prototype is the spec)";
+        const nightShift = st.mode === "spec" && !t.other;
+        const build = nightShift ? "[i] let the night shift build it (the prototype is the spec)" : "[i]mplement it now (the prototype is the spec)";
         const a = await ask(`[o]pen the issue, ${build}, [g]rill it, [s]kip`, "oigS");
         if (a === "o") { tryShell("gh", ["issue", "view", String(t.number), "-R", repo(), "--web"]); skip.add(`${t.number}:${t.status}`); }
         else if (a === "i") act(`label #${t.number}`, () => gh("issue", "edit", String(t.number), "-R", repo(), "--remove-label", "prototype",
-          ...(st.mode === "spec" ? [] : ["--add-label", "agent:implement"])));
+          ...(nightShift ? [] : ["--add-label", "agent:implement"])));
         else if (a === "g") claude([], `/grill-with-docs Settle issue #${t.number}. Its prototype is on the prototype/issue-${t.number} branch, with screenshots in the comments. Post the decisions as a comment on #${t.number}.\n\n(sf) Type /exit when done.`);
         else skip.add(`${t.number}:${t.status}`);
       } else if (t.status === "failed") {
@@ -572,7 +597,7 @@ async function phaseBuild(st) {
         const [kind, num] = onPr ? ["pr", t.pr.number] : ["issue", t.number];
         const last = JSON.parse(gh(kind, "view", String(num), "-R", repo(), "--json", "comments")).comments.filter((x) => x.body.includes("factory:status")).pop();
         console.log(`${c.r(`${onPr ? `PR #${num} (ticket #${t.number})` : `#${t.number}`} failed`)}: ${t.title}\n  ${(last?.body ?? "").replace(/<!--.*?-->/g, "").trim().slice(0, 300)}`);
-        if (st.mode === "spec" && !onPr) {
+        if (st.mode === "spec" && !onPr && !t.other) {
           // A night-shift ticket: unpark it, then resume the spec. The night shift starts again from the frontier.
           if ((await ask(`[r]etry: unpark #${t.number} and resume the night shift on spec #${st.spec}, [s]kip`, "rS")) === "r") {
             if (!t.specRow) act(`unpark #${t.number}`, () => gh("issue", "edit", String(t.number), "-R", repo(), "--remove-label", "agent:blocked"));
@@ -624,11 +649,7 @@ async function sendEvent(name, what) {
 }
 
 async function run(st) {
-  if (st.phase === "finished") {
-    console.log(`${c.g(`Done: spec #${st.spec} is built.`)} ${c.d(`(${st.idea})`)}`);
-    console.log(`Next idea: ${c.b('sf idea "<what you want to build>"')}  ·  Other runs: ${c.b("sf retro")}, ${c.b("sf architecture")}, ${c.b("sf ratchet")}`);
-    return;
-  }
+  if (!st || st.phase === "finished") return board(st);
   await preflight();
   const phases = { grill: phaseGrill, wayfinder: phaseWayfinder, spec: phaseSpec, tickets: phaseTickets, build: phaseBuild, done: phaseDone };
   while (phases[st.phase]) {
@@ -643,6 +664,20 @@ const [cmd, ...rest] = process.argv.slice(2);
 /** Splits --recommended / -r from the idea words. */
 const ideaArgs = (args) => ({ recommended: args.some((a) => a === "--recommended" || a === "-r"),
   idea: args.filter((a) => a !== "--recommended" && a !== "-r").join(" ").trim() });
+/**
+ * No idea in progress: the factory's other work in this repo. Issues filed or labelled on GitHub show here,
+ * and sf offers the ready-for-agent ones to the factory, the same way it offers a spec's tickets.
+ */
+async function board(st) {
+  if (st) console.log(`${c.g(`Done: spec #${st.spec} is built.`)} ${c.d(`(${st.idea})`)}`);
+  else console.log(c.d("No idea in progress here."));
+  console.log(`Next idea: ${c.b('sf idea "<what you want to build>"')}  ·  Other runs: ${c.b("sf retro")}, ${c.b("sf architecture")}, ${c.b("sf ratchet")}\n`);
+  await preflight();
+  const view = { mode: "explore" }; // no spec: only the other issues. Never saved.
+  if (!tickets(null).length) { console.log(render(view, [], agents())); return; }
+  await phaseBuild(view);
+}
+
 async function startIdea(idea, recommended = false) {
   const old = load();
   if (old && old.phase !== "finished" && (await ask(`An idea is in progress here (step "${old.phase}"). Replace it?`, "yN")) !== "y") process.exit(0);
@@ -651,10 +686,12 @@ async function startIdea(idea, recommended = false) {
   save(st); await run(st);
 }
 const need = () => load() ?? noIdeaHere();
+// A factory repo with no idea yet still has a board. Outside a factory repo, list the ideas elsewhere.
+const isFactoryRepo = () => fs.existsSync(".sandcastle/agent-workflows");
 switch (cmd) {
   case "new": { const a = ideaArgs(rest.slice(1)); await newProject(rest[0], a.idea || undefined, a.recommended); break; }
   case "idea": case "build": { const a = ideaArgs(rest); await startIdea(a.idea || die('Give the idea: sf idea [--recommended] "<what you want to build>"'), a.recommended); break; }
-  case undefined: case "resume": await run(need()); break;
+  case undefined: case "resume": await run(load() ?? (isFactoryRepo() ? null : noIdeaHere())); break;
   case "status": { const st = need(); if (!st.spec) { console.log(`Step "${st.phase}". No spec yet.`); break; } await watch(st, { once: true }); break; }
   case "watch": { const st = need(); if (!st.spec) die("No spec yet."); await watch(st); break; }
   case "logs": {
