@@ -35,16 +35,20 @@ flowchart LR
 ./init-host.sh --observability phoenix
 ./setup-wizard.sh                  # tokens, firewall, start, then webhook or polling
 
-# A project, new or existing. Add --dry-run first to see what changes.
+ln -s "$PWD/sf" ~/.local/bin/sf
+
+# A new project: the base, the agent files, a first commit and a private GitHub repo.
+cd ~/code && sf new my-app "<what you want to build>"
+
+# Or an existing project. Add --dry-run first to see what changes.
 ./init-project.sh --path ~/code/my-app --labels
 (cd ~/code/my-app && npm i -D @ai-hero/sandcastle@^0.14 tsx zod@^3.25)
-
-# From an idea to merged PRs.
-ln -s "$PWD/sf" ~/.local/bin/sf
 cd ~/code/my-app && sf idea "<what you want to build>"
 ```
 
 Each init script prints its next steps at the end.
+
+`sf new` makes a React Router, TypeScript and Vitest app, the stack the agent prompts expect. It adds the agent files and the scripts the agents run: `npm run check` (types, then tests) and `npm run build`. It runs both and makes the first commit. Then it asks before it creates the private GitHub repo and the factory labels. After that, rerun `setup-wizard.sh` to point the factory at the new repo.
 
 ## The `sf` pipeline
 
@@ -81,7 +85,7 @@ While the factory builds, `sf` shows each ticket's status and the agents' last l
 - a prototype is ready to see
 - a run failed
 
-Other commands: `sf status`, `sf watch`, `sf logs <text>`, `sf retro`, `sf architecture`, `sf ratchet` and `sf rebase`.
+Other commands: `sf new`, `sf status`, `sf watch`, `sf logs <text>`, `sf retro`, `sf architecture`, `sf ratchet` and `sf rebase`.
 
 - **Planning sessions are interactive.** Type `/exit` in Claude to go back to `sf`. Each session writes a small result file in `.sf/`, for example the spec number. If the file is missing, `sf` asks you.
 - **GitHub holds the state.** `.sf/state.json` holds only the Claude session id and the spec and map numbers. Git ignores it.

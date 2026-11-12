@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 // sf: from an idea to merged PRs, one confirmed step at a time.
 //
+//   sf new <name> ["<idea>"]             a new project: React Router + TypeScript + Vitest base, agent files,
+//                                        checks, first commit, optional private GitHub repo with factory labels
 //   sf idea "<what you want to build>"   start: grilling, Wayfinder if needed, spec, tickets, factory
 //   sf build "<...>"                     the same as sf idea
 //   sf                                   resume from where the last step stopped
@@ -271,12 +273,65 @@ async function watch(st, { skip = new Set(), once = false } = {}) {
 }
 
 // ── the pipeline ─────────────────────────────────────────────────────────
+// ── sf new ────────────────────────────────────────────────────────────────
+const KIT = new URL("..", import.meta.url).pathname;
+
+/** A factory-ready project: the base the agents build on, with the checks they run, committed and optionally on GitHub. */
+async function newProject(dir, idea) {
+  if (!/^[A-Za-z0-9._-]+$/.test(dir ?? "")) die('Give a folder name: sf new <name> ["<idea>"]. Letters, digits, . _ and - only.');
+  if (fs.existsSync(dir)) die(`${dir} exists already. sf new starts a fresh project. For an existing one, run sf-kit/init-project.sh.`);
+  const run = (what, cmd, args) => {
+    console.log(c.b(`\n· ${what}`));
+    // No stdin for the tools: npm and npx would read the answers meant for sf.
+    if (spawnSync(cmd, args, { stdio: ["ignore", "inherit", "inherit"] }).status !== 0) die(`${what} failed. Fix the cause, delete ${dir}, then run sf new again.`);
+  };
+  run("React Router + TypeScript base", "npx", ["-y", "create-react-router@latest", dir, "--yes", "--no-git-init", "--no-install"]);
+  process.chdir(dir);
+  // The agents run `npm run check` before each commit, and `npm run build` must pass too.
+  const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+  Object.assign(pkg.scripts, { test: "vitest run --passWithNoTests", check: "npm run typecheck && npm run test" });
+  fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2) + "\n");
+  run("Agent files, skills and agent scripts", `${KIT}init-project.sh`, ["--path", "."]);
+  const edit = (file, pairs) => { let t = fs.readFileSync(file, "utf8"); for (const [a, b] of pairs) t = t.replace(a, b); fs.writeFileSync(file, t); };
+  edit("AGENTS.md", [
+    ["<!-- CHANGEME: list the checks that npm run check chains (format, lint, types, boundaries, tests). -->",
+      "`npm run check` runs `typecheck` (React Router typegen, then `tsc`), then `test` (Vitest). `npm run build` must pass too."],
+    // This base has no pre-commit hook, so the template's hook rule would mislead the agents.
+    [/The pre-commit hook refuses[^\n]*\n\n/, ""],
+    ["| <!-- CHANGEME --> | |", "| `+types` imports fail | Run `npm run typecheck`. It generates the route types first. |"],
+  ]);
+  edit("GLOSSARY.md", [["<!-- CHANGEME: product name -->", dir]]);
+  if (!/^\/?node_modules\/?$/m.test(fs.readFileSync(".gitignore", "utf8"))) fs.appendFileSync(".gitignore", "node_modules/\n");
+  run("Dependencies", "npm", ["i", "--no-audit", "--no-fund"]);
+  run("Agent runner dependencies", "npm", ["i", "-D", "--no-audit", "--no-fund", "@ai-hero/sandcastle@^0.14", "tsx", "zod@^3.25", "vitest"]);
+  run("npm run check", "npm", ["run", "check"]);
+  run("npm run build", "npm", ["run", "build"]);
+  // init-project.sh may have run git init already. Either way the branch is main.
+  if (!fs.existsSync(".git")) sh("git", ["init", "-q"]);
+  sh("git", ["symbolic-ref", "HEAD", "refs/heads/main"]);
+  console.log(c.b("\n· First commit"));
+  sh("git", ["add", "-A"]);
+  sh("git", ["commit", "-qm", "Factory-ready base: React Router, TypeScript, Vitest, agent files"]);
+  console.log(c.g(`\n${dir} is ready: npm run check and npm run build pass.`));
+
+  const login = tryShell("gh", ["api", "user", "--jq", ".login"])?.trim();
+  if (login && (await ask(`Create the private GitHub repo ${login}/${dir}, push, and add the factory labels?`)) === "y") {
+    run("GitHub repo", "gh", ["repo", "create", `${login}/${dir}`, "--private", "--source", ".", "--push"]);
+    run("Factory labels", `${KIT}init-project.sh`, ["--path", ".", "--labels"]);
+    console.log(c.d(`The factory serves one repo. Point it here: rerun setup-wizard.sh and enter ${login}/${dir}.`));
+  } else {
+    console.log(c.d(`Later: gh repo create <owner>/${dir} --private --source . --push, then ${KIT}init-project.sh --path . --labels`));
+  }
+  if (idea && tryShell("git", ["remote", "get-url", "origin"]) && (await ask("Start the idea now?")) === "y") return startIdea(idea);
+  console.log(`\nNext: ${c.b(`cd ${dir} && sf idea "${idea ?? "<what you want to build>"}"`)}`);
+}
+
 async function preflight() {
   for (const [bin, hint] of [["gh", "https://cli.github.com"], ["claude", "npm i -g @anthropic-ai/claude-code"], ["git", ""]])
     if (tryShell(bin, ["--version"]) === null) die(`${bin} is missing. ${hint}`);
   if (tryShell("gh", ["auth", "status"]) === null) die("gh is not signed in. Run: gh auth login");
   if (!fs.existsSync(".claude/skills/grill-with-docs") && !fs.existsSync(".agents/skills/grill-with-docs"))
-    die("The course skills are not in this repo. Run sf-kit/init-project.sh --path . --labels first.");
+    die("The skills are not in this repo. For a new project run: sf new <name>. For an existing one: sf-kit/init-project.sh --path . --labels");
   if (!fs.existsSync(".claude/skills")) console.log(c.y("Warning: no .claude/skills link, so Claude Code may not find the skills. Rerun init-project.sh."));
   repo();
 }
@@ -506,15 +561,16 @@ async function run(st) {
 
 // ── commands ─────────────────────────────────────────────────────────────
 const [cmd, ...rest] = process.argv.slice(2);
+async function startIdea(idea) {
+  const old = load();
+  if (old && old.phase !== "finished" && (await ask(`An idea is in progress here (step "${old.phase}"). Replace it?`, "yN")) !== "y") process.exit(0);
+  const st = { idea, phase: "grill", session: randomUUID(), started: new Date().toISOString() };
+  save(st); await run(st);
+}
 const need = () => load() ?? die('No idea in progress here. Start one: sf idea "<what you want to build>"');
 switch (cmd) {
-  case "idea": case "build": {
-    const idea = rest.join(" ").trim() || die('Give the idea: sf idea "<what you want to build>"');
-    const old = load();
-    if (old && old.phase !== "finished" && (await ask(`An idea is in progress here (step "${old.phase}"). Replace it?`, "yN")) !== "y") process.exit(0);
-    const st = { idea, phase: "grill", session: randomUUID(), started: new Date().toISOString() };
-    save(st); await run(st); break;
-  }
+  case "new": await newProject(rest[0], rest.slice(1).join(" ").trim() || undefined); break;
+  case "idea": case "build": await startIdea(rest.join(" ").trim() || die('Give the idea: sf idea "<what you want to build>"')); break;
   case undefined: case "resume": await run(need()); break;
   case "status": { const st = need(); if (!st.spec) { console.log(`Step "${st.phase}". No spec yet.`); break; } await watch(st, { once: true }); break; }
   case "watch": { const st = need(); if (!st.spec) die("No spec yet."); await watch(st); break; }
@@ -528,5 +584,5 @@ switch (cmd) {
   case "ratchet": await sendEvent("factory/ratchet.requested", "Ratchet run"); break;
   case "rebase": await sendEvent("factory/rebase.sweep", "Rebase sweep"); break;
   case "help": case "-h": case "--help":
-  default: console.log(fs.readFileSync(new URL(import.meta.url), "utf8").split("\n").slice(1, 13).map((l) => l.replace(/^\/\/ ?/, "")).join("\n"));
+  default: console.log(fs.readFileSync(new URL(import.meta.url), "utf8").split("\n").slice(1, 15).map((l) => l.replace(/^\/\/ ?/, "")).join("\n"));
 }
