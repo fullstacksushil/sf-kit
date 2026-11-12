@@ -39,8 +39,27 @@ const gh = (...args) => sh("gh", args);
 const ghApi = (path, ...rest) => JSON.parse(gh("api", path, ...rest) || "null");
 const ghPaged = (path) => JSON.parse(gh("api", "--paginate", "--slurp", path)).flat();
 
+// Every folder where an idea started, so sf can point you back to one from anywhere.
+const REGISTRY = `${process.env.XDG_STATE_HOME ?? `${process.env.HOME}/.local/state`}/sf/projects.json`;
+const projects = () => { try { return JSON.parse(fs.readFileSync(REGISTRY, "utf8")); } catch { return []; } };
+function remember() {
+  const list = [...new Set([process.cwd(), ...projects()])];
+  fs.mkdirSync(REGISTRY.replace(/\/[^/]+$/, ""), { recursive: true });
+  fs.writeFileSync(REGISTRY, JSON.stringify(list, null, 2) + "\n");
+}
+function noIdeaHere() {
+  const open = projects().flatMap((dir) => {
+    try { const st = JSON.parse(fs.readFileSync(`${dir}/${STATE}`, "utf8")); return st.phase === "finished" ? [] : [{ dir, st }]; } catch { return []; }
+  });
+  if (!open.length) die('No idea in progress here. Start one: sf idea "<what you want to build>"');
+  console.error(c.r("sf: no idea in progress in this folder. sf keeps its state in each project's .sf/ folder."));
+  console.error("Ideas in progress:");
+  for (const { dir, st } of open) console.error(`  ${c.b(`cd ${dir} && sf`)}  ${c.d(`step "${st.phase}"${st.spec ? `, spec #${st.spec}` : ""}: ${st.idea.slice(0, 60)}`)}`);
+  process.exit(1);
+}
+
 const load = () => (fs.existsSync(STATE) ? JSON.parse(fs.readFileSync(STATE, "utf8")) : null);
-const save = (s) => { fs.mkdirSync(SF, { recursive: true }); fs.writeFileSync(STATE, JSON.stringify(s, null, 2) + "\n"); };
+const save = (s) => { remember(); fs.mkdirSync(SF, { recursive: true }); fs.writeFileSync(STATE, JSON.stringify(s, null, 2) + "\n"); };
 const marker = (name) => `${SF}/${name}.json`;
 const readMarker = (name) => { try { return JSON.parse(fs.readFileSync(marker(name), "utf8")); } catch { return null; } };
 const clearMarker = (name) => fs.rmSync(marker(name), { force: true });
@@ -598,7 +617,7 @@ async function startIdea(idea, recommended = false) {
   if (recommended) console.log(c.d("Recommended mode: the grilling answers its own questions and lists its decisions at the end."));
   save(st); await run(st);
 }
-const need = () => load() ?? die('No idea in progress here. Start one: sf idea "<what you want to build>"');
+const need = () => load() ?? noIdeaHere();
 switch (cmd) {
   case "new": { const a = ideaArgs(rest.slice(1)); await newProject(rest[0], a.idea || undefined, a.recommended); break; }
   case "idea": case "build": { const a = ideaArgs(rest); await startIdea(a.idea || die('Give the idea: sf idea [--recommended] "<what you want to build>"'), a.recommended); break; }
