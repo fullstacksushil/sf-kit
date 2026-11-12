@@ -1,0 +1,69 @@
+# Self-hosted factory services. init-host.sh copies this to /opt/factory and runs it.
+#   docker compose --env-file /etc/factory/inngest.env up -d                     # Inngest only
+#   docker compose --env-file /etc/factory/inngest.env --profile phoenix up -d   # plus Phoenix traces
+# Based on the official Inngest example: https://www.inngest.com/docs/self-hosting
+services:
+  inngest:
+    image: inngest/inngest:${INNGEST_VERSION:-latest}   # pin a version in production
+    command: >
+      inngest start
+      --sdk-url http://host.docker.internal:${ORCHESTRATOR_PORT:-3000}/api/inngest
+      --poll-interval 60
+    ports:
+      - "127.0.0.1:8288:8288"   # API and dashboard: localhost only. Use an SSH tunnel to view.
+    environment:
+      INNGEST_EVENT_KEY: ${INNGEST_EVENT_KEY:?set in /etc/factory/inngest.env}
+      INNGEST_SIGNING_KEY: ${INNGEST_SIGNING_KEY:?set in /etc/factory/inngest.env}
+      INNGEST_POSTGRES_URI: postgres://inngest:${POSTGRES_PASSWORD}@postgres:5432/inngest
+      INNGEST_REDIS_URI: redis://redis:6379
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # the orchestrator app runs on the host
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: inngest
+      POSTGRES_USER: inngest
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in /etc/factory/inngest.env}
+    volumes: [postgres_data:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U inngest"]
+      interval: 5s
+      retries: 20
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes: [redis_data:/data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 20
+    restart: unless-stopped
+
+  # Optional: agent traces. One container, SQLite on a volume. License: Elastic License 2.0.
+  # Agents reach it as http://phoenix:6006/v1/traces on factory-net. The UI is localhost only.
+  phoenix:
+    profiles: ["phoenix"]
+    image: arizephoenix/phoenix:${PHOENIX_VERSION:-latest}
+    environment:
+      PHOENIX_WORKING_DIR: /mnt/data
+    volumes: [phoenix_data:/mnt/data]
+    ports:
+      - "127.0.0.1:6006:6006"
+    networks: [default, factory-net]
+    restart: unless-stopped
+
+networks:
+  factory-net:
+    external: true   # created by init-host.sh, shared with the run containers
+
+volumes:
+  postgres_data:
+  redis_data:
+  phoenix_data:
