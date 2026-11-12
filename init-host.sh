@@ -108,6 +108,9 @@ for cidr in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16; do
 done
 rule DOCKER-USER -s "$SUBNET" -d "$SUBNET" -j ACCEPT
 rule INPUT -s "$SUBNET" -j DROP
+# Inserted above the DROP: replies to connections the host opened (your browser to Phoenix on 6006) pass.
+# Agents still cannot open a connection to the host.
+rule INPUT -s "$SUBNET" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 echo "These iptables rules do not survive a reboot. Save them with iptables-save or your distro's tool."
 
 say "Inngest, Postgres, Redis${OBS:+ (observability: $OBS)}"
