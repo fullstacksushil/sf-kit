@@ -182,6 +182,7 @@ Polling is up to a minute slower. It makes one API call per trigger label a minu
 
 ## Limits
 
+- Run containers use the public DNS servers 1.1.1.1 and 8.8.8.8, because the run network cannot reach a resolver on your LAN. Set `RUNNER_DNS` in the orchestrator env to use others.
 - One factory host serves one repo (`GITHUB_REPO`). Run a second orchestrator for a second repo.
 - The prototype task posts screenshots and a draft PR. It does not deploy a preview you can click. To try it, check out the PR and follow `prototypes/issue-<n>/README.md`.
 - `init-project.sh` adds the `prototype-needed` verdict only to explore files it creates. In an existing copy, add it to the enum in `.sandcastle/agent-workflows/explore/plan-schema.ts` yourself.
