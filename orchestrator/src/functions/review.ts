@@ -87,6 +87,11 @@ export const reviewPr = inngest.createFunction(
       if (verdict !== "full") throw new NonRetriableError("The review produced no verdict (no ## Standards: heading). The PR stays a draft.");
       await step.run("mark-ready", () => docker.oneShot(runId, `cd / && gh pr ready ${n} --repo ${owner}/${repo}`, ghToken()));
     } catch (err) {
+      // A person merged or closed the PR during the review. Then the last steps fail (gh pr ready, a push to a
+      // deleted branch), and that is no failure of the review: no agent:blocked, no failure comment, no retry.
+      // check: not yet seen in a live run. The first live case was qt PR #34 on 2026-11-13, before this code.
+      const state = await step.run("read-pr-state", async () => (await gh.pulls.get({ owner, repo, pull_number: n })).data.state);
+      if (state !== "open") return { ended: `PR #${n} was closed or merged during the review` };
       await step.run("report-failure", async () => {
         await gh.issues.addLabels({ owner, repo, issue_number: n, labels: ["agent:blocked"] });
         await gh.issues.createComment({
