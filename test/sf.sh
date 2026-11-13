@@ -23,7 +23,7 @@ chmod +x "$T"/bin/*
 cat > "$T/srv.mjs" <<'S'
 import http from "node:http"; import fs from "node:fs";
 // /v0/gql answers from $T/gql/apps, $T/gql/runs and $T/gql/run-<id>. A missing file is a GraphQL error, as Inngest gives for an unknown run.
-const gql = (b) => { const qs = JSON.parse(b).query, k = /^\{\s*apps/.test(qs) ? "apps" : /runs\(/.test(qs) ? "runs" : `run-${qs.match(/runID: "(\w+)"/)?.[1]}`;
+const gql = (b) => { const j = JSON.parse(b), qs = j.query, k = /^\{\s*apps/.test(qs) ? "apps" : /runs\(/.test(qs) ? "runs" : `run-${j.variables?.id}`;
   try { return fs.readFileSync(`${process.argv[4]}/gql/${k}`, "utf8"); } catch { return '{"errors":[{"message":"no rows"}],"data":null}'; } };
 http.createServer((q, r) => { let b = ""; q.on("data", (d) => b += d); q.on("end", () => { fs.appendFileSync(process.argv[2], `${q.url} ${b}\n`); r.end(q.url === "/v0/gql" ? gql(b) : "ok"); }); }).listen(0, "127.0.0.1", function () { fs.writeFileSync(process.argv[3], String(this.address().port)); });
 S
@@ -98,6 +98,7 @@ ok "sf new prints wizard command with --repo" 'grep -q -- "--repo" <<<"$(grep -n
 # agent activity: canned docker logs, one container for each case
 mkdir -p "$T/logs" "$T/repo/.sandcastle/agent-workflows" "$T/repo/.claude/skills/grill-with-docs"
 printf 'a1\towner/repo#1\t1m\na2\towner/repo#2\t3m\na3\towner/repo#3\t2m\na4\towner/repo#4\t9m\na5\towner/repo#5\t1m\n' > "$T/ps"
+printf 'a6\towner/repo#6\t1m\na7\towner/repo#7\t1m\na8\towner/repo#8\t1m\na9\towner/repo#9\t1m\n' >> "$T/ps"
 now5=$(date -u -d '-5 sec' +%Y-%m-%dT%H:%M:%SZ)
 pre() { printf '{"sf":1,"t":"2026-11-13T15:25:0%sZ","ev":"PreToolUse","tool":"%s","in":"%s"}\n' "$1" "$2" "$3"; }
 post() { printf '{"sf":1,"t":"2026-11-13T15:25:0%sZ","ev":"PostToolUse","tool":"%s","ms":%s}\n' "$1" "$2" "$3"; }
@@ -110,6 +111,13 @@ post() { printf '{"sf":1,"t":"2026-11-13T15:25:0%sZ","ev":"PostToolUse","tool":"
   echo 'Bash(sleep 2)'; echo '{"ev":"PreToolUse","tool":"Fake","in":"x"}'; post 2 Write 55
   for i in 1 2 3 4 5; do echo "Sandcastle closing line $i"; done; } > "$T/logs/a3"
 printf 'old 1\nold 2\nold 3\nold 4\nold 5\x1b]0;title\x07\nold 6\n' > "$T/logs/a4"
+# Lines with a call id (the hook since review item 2). Old lines above have none and pair by tool.
+prei() { printf '{"sf":1,"t":"2026-11-13T15:25:0%sZ","ev":"PreToolUse","id":"%s","tool":"%s","in":"%s"}\n' "$@"; }
+endi() { printf '{"sf":1,"t":"2026-11-13T15:25:0%sZ","ev":"%s","id":"%s","tool":"%s","ms":%s}\n' "$@"; }
+{ prei 1 i1 Read slow.ts; prei 1 i2 Read fast.ts; endi 2 PostToolUse i2 Read 50; endi 3 PostToolUse i1 Read 900; } > "$T/logs/a6"
+{ prei 1 h1 Bash hang; prei 2 h2 Bash 'echo b'; endi 3 PostToolUse h2 Bash 30; prei 4 h3 Bash 'echo c'; endi 5 PostToolUse h3 Bash 40; } > "$T/logs/a7"
+{ cat "$T/logs/a7"; printf '{"sf":1,"t":"2026-11-13T15:25:06Z","ev":"Stop"}\n'; } > "$T/logs/a8"
+{ prei 1 f1 Bash fails; endi 2 PostToolUseFailure f1 Bash 20; prei 3 f2 Bash rm; printf '{"sf":1,"t":"2026-11-13T15:25:04Z","ev":"PermissionDenied","id":"f2","tool":"Bash"}\n'; } > "$T/logs/a9"
 printf '{"sf":1,"t":"2026-11-13T15:25:01Z","ev":"PreToolUse","tool":"Bash\\u001b[31m","in":"\\u001b]0;pwned\\u0007\\u001b[31mrm -rf /\\u001b[0m\\r\\nnext"}\n' > "$T/logs/a5"
 
 board=$(cd "$T/repo" && "$SF" 2>&1 </dev/null | sed 's/\x1b\[[0-9;]*m//g')
@@ -122,6 +130,10 @@ ok "finished run: finishing after Stop" 'agent 2 | grep -q finishing'
 ok "finished run: last 3 finished actions" '[ "$(agent 2 | grep -cE "Write|Bash|Edit|Grep")" = 3 ] && agent 2 | grep -q "2.1s" && ! agent 2 | grep -q first-call'
 ok "noise: activity lines only" 'agent 3 | grep -Eq "Write +notes.md" && ! agent 3 | grep -Eq "Fake|Sandcastle|sleep"'
 ok "no activity: last 4 raw lines" 'agent 4 | grep -q "old 6" && agent 4 | grep -q "old 3" && ! agent 4 | grep -q "old 2"'
+ok "ids: parallel calls of one tool finish out of order" 'agent 6 | grep -Eq "done Read +slow.ts · 900ms" && agent 6 | grep -Eq "done Read +fast.ts · 50ms" && ! agent 6 | grep -q "now"'
+ok "ids: a call that never finishes, later calls of its tool" 'agent 7 | grep -Eq "now  Bash +hang" && agent 7 | grep -Eq "Bash +echo b · 30ms" && agent 7 | grep -Eq "Bash +echo c · 40ms"'
+ok "ids: Stop closes the open call" 'agent 8 | grep -q finishing && ! agent 8 | grep -q "now"'
+ok "ids: a failed and a denied call are closed" 'agent 9 | grep -Eq "fail Bash +fails · 20ms" && agent 9 | grep -Eq "fail Bash +rm · denied" && ! agent 9 | grep -q "now"'
 ok "escapes: text shown" 'agent 5 | grep -q "rm -rf /"'
 ok "escapes: stripped" '! grep -q $'"'"'\x07'"'"' <<<"$raw" && ! grep -qF $'"'"'\x1b]'"'"' <<<"$raw" && ! grep -qF $'"'"'\x1b[31m'"'"' <<<"$raw"'
 : > "$T/docker.log"
@@ -133,6 +145,21 @@ ok "logs: no activity line, raw lines cleaned" '[ "$(wc -l <<<"$lg")" = 6 ] && g
 lg=$(cd "$T/repo" && "$SF" logs "repo#5" 2>&1 </dev/null)
 lg=$(sed 's/\x1b\[[0-9;]*m//g' <<<"$lg")  # drop sf's own colours
 ok "logs: escapes stripped" 'grep -q "rm -rf /" <<<"$lg" && ! grep -q $'"'"'[\x07\x1b\r]'"'"' <<<"$lg"'
+# subjects: exact match wins, a partial match only when it is the one match. Subject text is cleaned and shell-safe.
+cp "$T/ps" "$T/ps.keep"
+BAD="x'\$(touch $T/pwned)\"y$(printf '\033[31m\330\234') z"
+printf 'b12\timplement #12\t1m\nb1\timplement #1\t1m\na10\t%s\t1m\n' "$BAD" > "$T/ps"; : > "$T/logs/b1"; : > "$T/logs/b12"; : > "$T/logs/a10"
+follows() { : > "$T/docker.log"; (cd "$T/repo" && "$SF" logs "$1" >"$T/lg.out" 2>&1 </dev/null); echo $? > "$T/rc"; grep -o "docker logs -f --tail 200 .*" "$T/docker.log"; }
+ok "match: exact subject wins" '[ "$(follows "implement #1")" = "docker logs -f --tail 200 b1" ]'
+ok "match: one partial match" '[ "$(follows "#12")" = "docker logs -f --tail 200 b12" ]'
+ok "match: several partial matches, listed, stop" '[ -z "$(follows implement)" ] && [ "$(cat "$T/rc")" != 0 ] && grep -q "implement #12, implement #1\." "$T/lg.out"'
+ok "match: raw subject with escapes (the herdr path)" '[ "$(follows "$BAD")" = "docker logs -f --tail 200 a10" ]'
+board=$(cd "$T/repo" && "$SF" 2>&1 </dev/null); hl=$(sed 's/\x1b\[[0-9;]*m//g' <<<"$board" | grep -F "sf logs " | grep -F "pwned")
+ok "subject: cleaned on the board" '! grep -q $'"'"'\x1b\[31m'"'"' <<<"$board" && ! grep -q $'"'"'\xd8\x9c'"'"' <<<"$board" && grep -qF "▶ x'"'"'" <<<"$hl"'
+hint=${hl##*sf logs }
+ok "subject: hint is safe to paste" 'eval "set -- $hint" && [ "$#" = 1 ] && [ ! -e "$T/pwned" ] && [ "$(follows "$1")" = "docker logs -f --tail 200 a10" ] && [ ! -e "$T/pwned" ]'
+ok "clean: bidi characters written as \\u escapes" '! LC_ALL=C.UTF-8 grep -qP "[\x{061c}\x{200e}\x{200f}\x{202a}-\x{202e}\x{2066}-\x{2069}]" "$(dirname "$SF")/cli/sf.mjs"'
+mv "$T/ps.keep" "$T/ps"
 # herdr hint: fake herdr first on PATH. A fake PATH without the real herdr covers "no herdr".
 mkdir -p "$T/h" "$T/nobin"
 for b in node git sh env dirname readlink; do ln -sf "$(command -v $b)" "$T/nobin/$b"; done
@@ -147,6 +174,8 @@ fakeherdr 'printf "2 plugins installed:\n- drovr (drovr) enabled [github:x/y]\n-
 ok "herdr hint: linked, no line" 'hint "$T/h:$PATH" | grep -q "^Agents" && ! hint "$T/h:$PATH" | grep -q "herdr plugin"'
 fakeherdr 'echo boom >&2; exit 1'
 ok "herdr hint: herdr fails, no line" 'hint "$T/h:$PATH" | grep -q "^Agents" && ! hint "$T/h:$PATH" | grep -q "herdr plugin"'
+fakeherdr 'sleep 5'
+ok "herdr hint: a hung herdr does not stall the board" 's=$(date +%s); out=$(hint "$T/h:$PATH"); [ $(( $(date +%s) - s )) -lt 4 ] && grep -q "^Agents" <<<"$out" && ! grep -q "herdr plugin" <<<"$out"'
 ok "herdr hint: no herdr, no line" 'hint "$T/nobin" | grep -q "^Agents" && ! hint "$T/nobin" | grep -q "herdr plugin"'
 fakeherdr 'printf "1 plugin installed:\n- drovr (drovr) enabled [github:x/y]\n"'
 : > "$T/h/count"; printf '#!/bin/sh\necho x >> "%s/h/count"\necho "- drovr (drovr) enabled"\n' "$T" > "$T/h/herdr"
@@ -159,6 +188,7 @@ rn() { printf '{"node":{"id":"%s","status":"%s","startedAt":%s,"function":{"name
 printf '{"data":{"runs":{"edges":[%s,%s,%s,%s]}}}' "$(rn R1 RUNNING "\"$(ago '12 min')\"" implement-ticket)" "$(rn R2 QUEUED null review-pr)" \
   "$(rn R3 RUNNING "\"$(ago '5 min')\"" rebase-pr)" "$(rn R4 RUNNING "\"$(ago '2 sec')\"" github-poll)" > "$T/gql/runs"
 trig() { printf '"t":{"payloads":["{\\"name\\":\\"factory/repo-a/x\\",\\"data\\":{%s},\\"ts\\":1}"]}' "$1"; }
+# check: assumed shape. An unfinished step span (status RUNNING, endedAt null) was not seen on 2026-11-13: the live trace lists a step only after it ends.
 printf '{"data":{"run":{"trace":{"status":"RUNNING","childrenSpans":[{"name":"executor.nonstep","status":"RUNNING","stepOp":null,"attempts":0,"startedAt":"%s","endedAt":null},{"name":"prepare","status":"COMPLETED","stepOp":"RUN","attempts":0,"startedAt":"%s","endedAt":"%s","duration":540000},{"name":"implement","status":"RUNNING","stepOp":"RUN","attempts":2,"startedAt":"%s","endedAt":null}]}},%s}}' \
   "$(ago '12 min')" "$(ago '12 min')" "$(ago '3 min')" "$(ago '3 min')" "$(trig '\"issueNumber\":12')" > "$T/gql/run-R1"
 printf '{"data":{"run":{"trace":{"status":"RUNNING","childrenSpans":[{"name":"fetch\\u001b]0;pwned\\u0007","status":"COMPLETED","stepOp":"RUN","attempts":0,"startedAt":"%s","endedAt":"%s"},{"name":"Execution","status":"RUNNING","stepOp":null,"attempts":0,"startedAt":"%s","endedAt":null}]}},%s}}' \
@@ -168,11 +198,12 @@ raw=$(cd "$T/repo" && "$SF" 2>&1 </dev/null); board=$(sed 's/\x1b\[[0-9;]*m//g' 
 run() { grep -E "^  . $1 " <<<"$board"; }
 ok "runs: a run in a step with its attempt" 'run implement-ticket | grep -Eq "#12 .*step implement · 3m0[0-9]s · attempt 2 · run 12m0[0-9]s"'
 ok "runs: a queued run with no trace" 'run review-pr | grep -q "queued" && ! run review-pr | grep -q "#"'
-ok "runs: PR number, after the last finished step" 'run rebase-pr | grep -Eq "PR #34 .*after fetch +· 4m0[0-9]s · run 5m0[0-9]s" && ! run rebase-pr | grep -q attempt'
+ok "runs: PR number, the last finished step and the time since it ended" 'run rebase-pr | grep -Eq "PR #34 .*last step fetch +ended 4m0[0-9]s ago · run 5m0[0-9]s" && ! run rebase-pr | grep -q attempt'
 ok "runs: github-poll left out" '! grep -q github-poll <<<"$board"'
 ok "runs: block before the agents" 'grep -n "^Runs\|^Agents" <<<"$board" | head -1 | grep -q Runs'
 ok "runs: Inngest text cleaned" '! grep -qF $'"'"'\x1b]'"'"' <<<"$raw" && ! grep -q $'"'"'\x07'"'"' <<<"$raw"'
 ok "runs: one request per run at most" '[ "$(grep -c "runID" "$T/events.log")" = 3 ]'
+ok "runs: ids go as GraphQL variables" 'grep -q "\"app\":\"u-a\"" "$T/events.log" && grep -q "\"id\":\"R1\"" "$T/events.log" && node -e '"'"'for (const l of require("fs").readFileSync(process.argv[1], "utf8").split("\n").filter((x) => x.startsWith("/v0/gql "))) if (/u-a|R1|R3/.test(JSON.parse(l.slice(8)).query)) process.exit(1)'"'"' "$T/events.log"'
 echo '{"data":{"runs":{"edges":[]}}}' > "$T/gql/runs"
 ok "runs: none, one line" '[ "$(cd "$T/repo" && "$SF" 2>&1 </dev/null | grep -c "^.*Runs")" = 1 ] && cd "$T/repo" && "$SF" 2>&1 </dev/null | grep -q "Runs: none"'
 ok "runs: Inngest down, one line, board goes on" '(cd "$T/repo" && INNGEST_BASE_URL=http://127.0.0.1:1 "$SF" 2>&1 </dev/null) | grep -q "Runs: Inngest at http://127.0.0.1:1 does not answer" && (cd "$T/repo" && INNGEST_BASE_URL=http://127.0.0.1:1 "$SF" 2>&1 </dev/null) | grep -q "^.*Agents"'
@@ -180,4 +211,10 @@ echo '{"data":{"apps":[{"id":"u-x","externalID":"software-factory-other"}]}}' > 
 ok "runs: app not found, one line" '(cd "$T/repo" && "$SF" 2>&1 </dev/null) | grep -q "Runs: Inngest has no app software-factory-repo-a"'
 ok "runs: remote factory without an Inngest URL, no block" '! (cd "$T/repo" && env -u INNGEST_BASE_URL SF_ORCHESTRATOR_URL=http://127.0.0.1:1 SF_FACTORY=repo-a "$SF" 2>&1 </dev/null) | grep -q "Runs"'
 ok "runs: remote factory with an Inngest URL, block shown" '(cd "$T/repo" && SF_ORCHESTRATOR_URL=http://127.0.0.1:1 SF_FACTORY=repo-a "$SF" 2>&1 </dev/null) | grep -q "Runs: Inngest has no app software-factory-repo-a"'
+git remote set-url origin git@github.com:owner/nofactory.git
+out=$(cd "$T/repo" && "$SF" 2>&1 </dev/null); rc=$?
+ok "runs: no factory, one line, no undefined" '[ $rc -eq 0 ] && grep -q "Runs: no factory found for this repo" <<<"$out" && ! grep -q undefined <<<"$out" && grep -q "Agents" <<<"$out"'
+printf 'GITHUB_REPO=owner/noport\n' > "$T/env/factories/np.env"; git remote set-url origin git@github.com:owner/noport.git
+out=$(cd "$T/repo" && "$SF" 2>&1 </dev/null); rc=$?
+ok "runs: factory file without PORT does not stop the board" '[ $rc -eq 0 ] && grep -q "Runs: Inngest has no app software-factory-np" <<<"$out" && grep -q "Agents" <<<"$out"'
 exit $fail

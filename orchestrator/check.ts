@@ -159,8 +159,8 @@ console.log("multi-factory checks ok");
   const out = `${dir}/out`;
   const fire = (ev: string, input: object) => {
     const cmd: string = hooks[ev][0].hooks[0].command;
-    assert.ok(cmd.endsWith("> /proc/1/fd/1"), cmd);
-    const r = spawnSync("bash", ["-c", cmd.replace("/proc/1/fd/1", out)], { input: JSON.stringify(input), encoding: "utf8" });
+    assert.ok(cmd.includes("> /proc/1/fd/1"), cmd);
+    const r = spawnSync("sh", ["-c", cmd.replace("/proc/1/fd/1", out)], { input: JSON.stringify(input), encoding: "utf8" });
     assert.equal(r.status, 0, r.stderr);
     const line = readFileSync(out, "utf8");
     assert.match(line, /^\{"sf":1,"t":"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ",/);
@@ -170,9 +170,20 @@ console.log("multi-factory checks ok");
   const cmdIn = { command: 'echo "a"\nb' + "x".repeat(100) };
   const base = { session_id: "s", cwd: "/work/repo", tool_use_id: "u" };
   assert.equal(fire("PreToolUse", { ...base, hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: cmdIn }),
-    `{"sf":1,"t":"T","ev":"PreToolUse","tool":"Bash","in":${JSON.stringify(JSON.stringify(cmdIn).slice(0, 80))}}\n`);
+    `{"sf":1,"t":"T","ev":"PreToolUse","id":"u","tool":"Bash","in":${JSON.stringify(JSON.stringify(cmdIn).slice(0, 80))}}\n`);
   assert.equal(fire("PostToolUse", { ...base, hook_event_name: "PostToolUse", tool_name: "Bash", tool_input: cmdIn, tool_response: {}, duration_ms: 2105 }),
-    `{"sf":1,"t":"T","ev":"PostToolUse","tool":"Bash","ms":2105}\n`);
+    `{"sf":1,"t":"T","ev":"PostToolUse","id":"u","tool":"Bash","ms":2105}\n`);
+  // A failed or denied call closes its id too. Input shapes from https://code.claude.com/docs/en/hooks, read on 2026-11-13.
+  assert.equal(fire("PostToolUseFailure", { ...base, hook_event_name: "PostToolUseFailure", tool_name: "Bash", tool_input: cmdIn, error: "Exit code 1", is_interrupt: false, duration_ms: 40 }),
+    `{"sf":1,"t":"T","ev":"PostToolUseFailure","id":"u","tool":"Bash","ms":40}\n`);
+  assert.equal(fire("PermissionDenied", { ...base, hook_event_name: "PermissionDenied", tool_name: "Bash", tool_input: cmdIn, reason: "[x]" }),
+    `{"sf":1,"t":"T","ev":"PermissionDenied","id":"u","tool":"Bash"}\n`);
+  // A hook never fails a tool call: exit 2 from PreToolUse would block it. Bad JSON and an unwritable target both exit 0.
+  for (const ev of Object.keys(hooks)) {
+    const cmd: string = hooks[ev][0].hooks[0].command;
+    assert.equal(spawnSync("sh", ["-c", cmd.replace("/proc/1/fd/1", out)], { input: "{not json", encoding: "utf8" }).status, 0, `${ev} with bad JSON`);
+    assert.equal(spawnSync("sh", ["-c", cmd.replace("/proc/1/fd/1", `${dir}/no/such/dir/out`)], { input: '{"hook_event_name":"Stop"}', encoding: "utf8" }).status, 0, `${ev} with an unwritable target`);
+  }
   assert.equal(fire("Stop", { ...base, hook_event_name: "Stop", last_assistant_message: "done" }), `{"sf":1,"t":"T","ev":"Stop"}\n`);
   // An existing user settings file stays as it was. The agent still runs.
   const home2 = `${dir}/home2`;

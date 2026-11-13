@@ -29,7 +29,8 @@ git -C "$T/proj" init -q && git -C "$T/proj" remote add origin git@github.com:Ow
 printf '["%s", "%s/gone"]\n' "$T/proj" "$T" > "$T/state/sf/projects.json"
 export T XDG_STATE_HOME="$T/state" PATH="$T/bin:$PATH" HERDR_BIN_PATH="$T/bin/herdr" HERDR_PLUGIN_ID=sf
 ESC=$(printf '\033')
-printf 'owner/repo#7 add $(touch %s/pwned) "x"%s[31mred\towner/repo\t5 minutes ago\nother/x#2 lint\tother/x\t1 hour ago\n' "$T" "$ESC" > "$T/ps"
+BIDI=$(printf '\330\234\342\200\256')  # U+061C and U+202E
+printf 'owner/repo#7 add $(touch %s/pwned) "x"%s[31mred%s\towner/repo\t5 minutes ago\nother/x#2 lint\tother/x\t1 hour ago\nlonely\n' "$T" "$ESC" "$BIDI" > "$T/ps"
 
 fail=0
 ok() { if eval "$2"; then echo "ok   $1"; else echo "FAIL $1"; fail=1; fi; }
@@ -37,11 +38,14 @@ pick() { (cd "$P" && PICK="$1" node picker.mjs </dev/null >"$T/out" 2>&1); }
 
 # picker list: subject, repo, age; control characters stripped; unknown folder said in the list
 pick 'owner/repo#7'
-ok "list: known agent" 'grep -q "owner/repo#7 add \$(touch $T/pwned) \"x\"\[31mred  owner/repo  5 minutes ago" "$T/fzf.in"'
+ok "list: known agent" 'grep -q "owner/repo#7 add \$(touch $T/pwned) \"x\"red    owner/repo  5 minutes ago" "$T/fzf.in"'
 ok "list: no escape char" '! grep -q "$ESC" "$T/fzf.in"'
+ok "list: no bidi char" '! grep -qF "$BIDI" "$T/fzf.in" && ! grep -q $'"'"'\xd8\x9c'"'"' "$T/fzf.in"'
+ok "list: a row with missing fields does not throw" 'grep -q "^2	lonely" "$T/fzf.in" && ! grep -q TypeError "$T/out"'
+ok "clean: equal to the one in cli/sf.mjs" '[ "$(grep "^const clean = " "$P/picker.mjs")" = "$(grep "^const clean = " "$P/../cli/sf.mjs")" ]'
 ok "list: unknown folder" 'grep -q "other/x#2 lint  other/x  1 hour ago  (no folder known)" "$T/fzf.in"'
 # the choice opens the follow pane with the raw subject in env, never through a shell
-ok "choice: exact herdr command" 'diff <(printf "%s\n" plugin pane open --plugin sf --entrypoint follow --env "SF_DIR=$T/proj" --env "SF_SUBJECT=owner/repo#7 add \$(touch $T/pwned) \"x\"${ESC}[31mred") "$T/herdr.args"'
+ok "choice: exact herdr command" 'diff <(printf "%s\n" plugin pane open --plugin sf --entrypoint follow --env "SF_DIR=$T/proj" --env "SF_SUBJECT=owner/repo#7 add \$(touch $T/pwned) \"x\"${ESC}[31mred$BIDI") "$T/herdr.args"'
 ok "choice: no shell ran the subject" '[ ! -e "$T/pwned" ]'
 
 # the follow pane runs sf logs "<subject>" in the project folder

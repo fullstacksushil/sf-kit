@@ -28,7 +28,7 @@ const c = { b: (s) => `\x1b[1m${s}\x1b[0m`, d: (s) => `\x1b[2m${s}\x1b[0m`, g: (
 
 // ── shell, gh, state ──────────────────────────────────────────────────────
 const sh = (cmd, args, opts = {}) => execFileSync(cmd, args, { encoding: "utf8", maxBuffer: 64 << 20, stdio: ["ignore", "pipe", "pipe"], ...opts });
-const tryShell = (cmd, args) => { try { return sh(cmd, args); } catch { return null; } };
+const tryShell = (cmd, args, opts) => { try { return sh(cmd, args, opts); } catch { return null; } };
 let REPO;
 const repo = () => REPO ??= (() => {
   const url = tryShell("git", ["remote", "get-url", "origin"])?.trim() ?? "";
@@ -241,21 +241,26 @@ const GATES = new Set(["pr-ready", "needs-you", "failed", "prototype-ready"]);
 
 // ── agents: docker containers labelled by the orchestrator ───────────────
 // Agent text is untrusted: drop escape sequences, control and bidi characters before it reaches the terminal.
-const clean = (s) => String(s ?? "").replace(/\x1b(\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(\x07|\x1b\\)?)/g, "").replace(/[\x00-\x1f\x7f-\x9f‎‏‪-‮⁦-⁩]/g, " ");
+const clean = (s) => String(s ?? "").replace(/\x1b(\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(\x07|\x1b\\)?)/g, "").replace(/[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, " ");
+// A subject as one shell word, safe to paste: single quotes, each ' written as '\''.
+const shellWord = (s) => `'${clean(s).replace(/'/g, `'\\''`)}'`;
 // An activity line, written by the agent container's hook: {"sf":1,"t":...,"ev":...}. Other JSON is not one.
 const activityLine = (l) => { if (!l.startsWith('{"sf":1,')) return null; try { return JSON.parse(l); } catch { return null; } };
 const dur = (ms) => (!Number.isFinite(ms) ? "?" : ms < 1000 ? `${Math.round(ms)}ms` : ms < 60_000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.floor(ms / 60_000)}m${String(Math.floor(ms / 1000) % 60).padStart(2, "0")}s`);
 const action = (e) => `${clean(e.tool).padEnd(6)} ${clean(e.in).trim()}`;
-/** Current action (the last PreToolUse with no later PostToolUse of that tool), the last 3 finished ones, and Stop. */
+/** Current action (the last open PreToolUse), the last 3 closed ones, and Stop. Stop closes every open call. */
+const CLOSE = new Set(["PostToolUse", "PostToolUseFailure", "PermissionDenied"]);
 function activity(events) {
-  const open = [], done = [];
-  let stop = false;
+  let open = [], stop = false;
+  const done = [];
   for (const e of events) {
     stop = e.ev === "Stop";
+    if (stop) open = [];
     if (e.ev === "PreToolUse") open.push(e);
-    if (e.ev !== "PostToolUse") continue;
-    const i = open.findIndex((o) => o.tool === e.tool); // the hook line carries no call id: pair the oldest open call of the tool
-    if (i >= 0) done.push({ ...open.splice(i, 1)[0], ms: Number(e.ms) });
+    if (!CLOSE.has(e.ev)) continue;
+    // A line with an id closes that call. A line from an older hook has none: pair the oldest open call of the tool.
+    const i = open.findIndex((o) => (e.id ? o.id === e.id : o.tool === e.tool));
+    if (i >= 0) done.push({ ...open.splice(i, 1)[0], ms: Number(e.ms), end: e.ev });
   }
   return { now: stop ? null : open.at(-1), done: done.slice(-3).reverse(), stop };
 }
@@ -264,7 +269,8 @@ function agents() {
   if (out === null) return null; // no docker access here: the factory runs elsewhere
   return out.trim().split("\n").filter(Boolean).map((l) => {
     const [name, subject, since] = l.split("\t");
-    // shortcut: 200 lines bound the read. A run with more Sandcastle noise than that shows fewer finished actions.
+    // ponytail: 200 lines bound the read. A run with more Sandcastle noise than that shows fewer finished actions.
+    // Upgrade path: read with --since from the container start, or have the hook write to a file of its own.
     const r = spawnSync("docker", ["logs", "--tail", "200", name], { encoding: "utf8" });
     const raw = `${r.stdout ?? ""}${r.stderr ?? ""}`.split("\n").map((s) => s.trim()).filter(Boolean);
     const events = raw.map(activityLine).filter(Boolean);
@@ -273,7 +279,7 @@ function agents() {
     const lines = [
       ...(stop ? ["finishing: the agent stopped"] : []),
       ...(now ? [`now  ${action(now)} · ${dur(Date.now() - Date.parse(now.t))}`] : []),
-      ...done.map((d) => `done ${action(d)} · ${dur(d.ms)}`),
+      ...done.map((d) => `${d.end === "PostToolUse" ? "done" : "fail"} ${action(d)} · ${d.end === "PermissionDenied" ? "denied" : dur(d.ms)}`),
     ];
     return { name, subject, since, lines };
   });
@@ -292,28 +298,33 @@ function followActivity(name) {
 
 // ── runs: the factory's Inngest runs, so a run with no agent container (prepare, push, a wait) shows too ──
 // Read-only GraphQL. One deadline per board bounds the requests, so a slow Inngest cannot stall the refresh.
-const gql = (query, signal) => fetch(`${INNGEST}/v0/gql`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ query }), signal })
+// check: read on this host on 2026-11-13 from the live self-hosted Inngest, not from docs: POST /v0/gql with no key,
+// `apps { id externalID }`, the `runs` filter (from: Time!, appIDs: [UUID!], status), `run(runID:) { trace }` and
+// `runTrigger(runID:) { payloads }` (a list of JSON event strings).
+const gql = (query, signal, variables = {}) => fetch(`${INNGEST}/v0/gql`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ query, variables }), signal })
   .then((r) => r.json()).then((j) => j.data ?? Promise.reject(new Error("no data")));
 const DONE = new Set(["COMPLETED", "FAILED", "CANCELLED", "SKIPPED"]);
 /** The RUNNING and QUEUED runs, or a string that says why there are none to show. undefined: no block. */
 async function runs() {
   if (process.env.SF_ORCHESTRATOR_URL && !process.env.INNGEST_BASE_URL) return undefined; // another machine and no Inngest URL: nothing to ask
-  const name = FACTORY?.name ?? (process.env.SF_ORCHESTRATOR_URL ? process.env.SF_FACTORY : findFactory()?.name), app = `software-factory-${name}`;
+  const name = FACTORY?.name ?? (process.env.SF_ORCHESTRATOR_URL ? process.env.SF_FACTORY : factoryFile()?.slice(0, -4)), app = `software-factory-${name}`;
+  if (!name) return "no factory found for this repo.";
   const signal = AbortSignal.timeout(2000), from = new Date(Date.now() - 7 * 86_400_000).toISOString();
   try {
     const id = (await gql("{ apps { id externalID } }", signal)).apps.find((a) => a.externalID === app)?.id;
     if (!id) return `Inngest has no app ${app}.`;
-    const edges = (await gql(`{ runs(first: 11, orderBy: [{field: QUEUED_AT, direction: DESC}], filter: {from: "${from}", appIDs: ["${id}"], status: [RUNNING, QUEUED]}) { edges { node { id status startedAt function { name } } } } }`, signal)).runs.edges;
+    const edges = (await gql(`query($from: Time!, $app: UUID!) { runs(first: 11, orderBy: [{field: QUEUED_AT, direction: DESC}], filter: {from: $from, appIDs: [$app], status: [RUNNING, QUEUED]}) { edges { node { id status startedAt function { name } } } } }`, signal, { from, app: id })).runs.edges;
     const list = edges.map((e) => e.node).filter((r) => r.function?.name !== "github-poll").slice(0, 10);
     // One request per run: a run Inngest cannot find (a queued one) fails the whole request, so runs are not batched.
     return await Promise.all(list.map(async (r) => {
-      const d = /^\w+$/.test(r.id) ? await gql(`{ run(runID: "${r.id}") { trace { childrenSpans { name status stepOp attempts startedAt endedAt } } } t: runTrigger(runID: "${r.id}") { payloads } }`, signal).catch(() => null) : null;
+      const d = await gql("query($id: String!) { run(runID: $id) { trace { childrenSpans { name status stepOp attempts startedAt endedAt } } } t: runTrigger(runID: $id) { payloads } }", signal, { id: r.id }).catch(() => null);
       let ev = {}; try { ev = JSON.parse(d?.t?.payloads?.[0] ?? "{}")?.data ?? {}; } catch {}
       // check: seen on 2026-11-13, a RUNNING run lists only finished steps plus "Execution" (stepOp null). Not seen: a step.sleep span.
+      // So the row names the last finished step and the time since it ended. The unfinished-step branch is an assumed shape.
       const steps = (d?.run?.trace?.childrenSpans ?? []).filter((s) => s.stepOp), now = steps.findLast((s) => !DONE.has(s.status)), last = steps.findLast((s) => DONE.has(s.status));
       const ms = (t) => Date.now() - Date.parse(t);
       const step = now ? `step ${clean(now.name)} · ${dur(ms(now.startedAt))}${now.attempts > 0 ? ` · attempt ${now.attempts}` : ""}`
-        : last ? `after ${clean(last.name)} · ${dur(ms(last.endedAt))}` : r.status === "QUEUED" ? "queued" : "starting";
+        : last ? `last step ${clean(last.name)} ended ${dur(ms(last.endedAt))} ago` : r.status === "QUEUED" ? "queued" : "starting";
       const subject = Number.isInteger(ev.issueNumber) ? `#${ev.issueNumber}` : Number.isInteger(ev.prNumber) ? `PR #${ev.prNumber}` : "";
       return { fn: clean(r.function?.name), subject, step, age: r.startedAt ? ` · run ${dur(ms(r.startedAt))}` : "" };
     }));
@@ -322,9 +333,13 @@ async function runs() {
 
 // The factory that serves this repo: its env file in $ENV_DIR/factories has GITHUB_REPO = origin. Name = file name.
 const envValue = (file, key) => { try { return fs.readFileSync(file, "utf8").match(new RegExp(`^${key}=['"]?([^'"\\n]+)`, "m"))?.[1]; } catch { return undefined; } };
-function findFactory() {
+/** The env file name of the factory that serves this repo, or undefined. Never stops sf. */
+function factoryFile() {
   let files = []; try { files = fs.readdirSync(`${ENV_DIR}/factories`).filter((f) => f.endsWith(".env")).sort(); } catch {}
-  const f = files.find((f) => envValue(`${ENV_DIR}/factories/${f}`, "GITHUB_REPO")?.toLowerCase() === repo().toLowerCase());
+  return files.find((f) => envValue(`${ENV_DIR}/factories/${f}`, "GITHUB_REPO")?.toLowerCase() === repo().toLowerCase());
+}
+function findFactory() {
+  const f = factoryFile();
   if (!f) return undefined;
   const file = `${ENV_DIR}/factories/${f}`, port = envValue(file, "PORT") ?? die(`No PORT in ${file}. Add the factory's port, for example PORT=3001.`);
   return { name: f.slice(0, -4), url: `http://127.0.0.1:${port}` };
@@ -353,7 +368,7 @@ async function factoryUp() {
 let herdrHint;
 function herdrNote() {
   if (herdrHint === undefined) {
-    const out = tryShell("herdr", ["plugin", "list"]); // check: output format read on 2026-11-13: "- <id> (<name>) enabled [source]"
+    const out = tryShell("herdr", ["plugin", "list"], { timeout: 1000 }); // check: output format read on 2026-11-13: "- <id> (<name>) enabled [source]"
     herdrHint = out !== null && !/^- sf /m.test(out) ? c.d(`The herdr plugin lets you pick and follow an agent in herdr: herdr plugin link ${KIT}herdr-plugin`) : "";
   }
   return herdrHint;
@@ -391,7 +406,7 @@ function render(st, list, ags, rns) {
   else {
     out.push(c.b(`Agents running: ${ags.length}`));
     for (const a of ags) {
-      out.push(`  ${c.y("▶")} ${a.subject} ${c.d(`· ${a.since} · sf logs "${a.subject}"`)}`);
+      out.push(`  ${c.y("▶")} ${clean(a.subject)} ${c.d(`· ${clean(a.since)} · sf logs ${shellWord(a.subject)}`)}`);
       for (const l of a.lines) out.push(c.d(`      ${cut(l, w - 8)}`));
     }
   }
@@ -820,8 +835,12 @@ switch (cmd) {
   case "watch": { const st = need(); if (!st.spec) die("No spec yet."); await watch(st); break; }
   case "logs": {
     const ags = agents() ?? die("No docker access on this machine.");
-    const a = ags.find((x) => x.subject.includes(rest.join(" "))) ?? die(`No running agent matches "${rest.join(" ")}". Running: ${ags.map((x) => x.subject).join(", ") || "none"}`);
-    followActivity(a.name); break;
+    // Both sides cleaned: the board shows a cleaned subject, herdr passes the raw one. An exact match wins.
+    const q = clean(rest.join(" ")), names = (l) => l.map((x) => clean(x.subject)).join(", ");
+    const exact = ags.filter((x) => clean(x.subject) === q), hits = exact.length ? exact : ags.filter((x) => clean(x.subject).includes(q));
+    if (!hits.length) die(`No running agent matches "${q}". Running: ${names(ags) || "none"}`);
+    if (!exact.length && hits.length > 1) die(`Several agents match "${q}": ${names(hits)}. Give the full subject.`);
+    followActivity(hits[0].name); break;
   }
   case "retro": retro(); break;
   case "architecture": await architecture(); break;

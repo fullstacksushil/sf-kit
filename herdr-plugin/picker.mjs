@@ -5,7 +5,8 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 
 const run = (cmd, args, opts = {}) => spawnSync(cmd, args, { encoding: "utf8", ...opts });
-const clean = (s) => s.replace(/[\x00-\x1f\x7f-\x9f]/g, "");
+// Must stay equal to clean() in cli/sf.mjs (test/herdr-plugin.sh compares them). The plugin cannot import from cli/.
+const clean = (s) => String(s ?? "").replace(/\x1b(\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(\x07|\x1b\\)?)/g, "").replace(/[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, " ");
 const wait = (msg) => { process.stdout.write(`${msg}\n[enter] `); try { fs.readSync(0, Buffer.alloc(64)); } catch {} process.exit(0); };
 
 // Same registry as sf (cli/sf.mjs): every folder where an idea started. Map each folder to its origin repo.
@@ -21,7 +22,7 @@ const ps = run("docker", ["ps", "--filter", "label=factory.subject", "--format",
 if (ps.status !== 0) wait(`docker ps failed: ${clean(ps.stderr ?? "")}`);
 const agents = ps.stdout.split("\n").filter(Boolean).map((l) => {
   const [subject, repo, age] = l.split("\t");
-  return { subject, repo, age, dir: folder.get(repo.toLowerCase()) };
+  return { subject, repo, age, dir: folder.get(String(repo).toLowerCase()) }; // a missing field: no folder, shown empty
 });
 if (!agents.length) wait("No running factory agents.");
 

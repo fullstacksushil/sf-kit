@@ -48,10 +48,16 @@ export const repoLabel = () => `factory.repo=${(process.env.GITHUB_REPO ?? "").t
 // The activity line `sf` reads: one JSON object per hook event on the container's stdout. "sf":1 comes first.
 // Hook stderr stays inside Claude Code, so the hook writes to process 1's stdout, which is the `docker logs` stream.
 // check: tested with the image's jq and no --init (process 1 is the start script). Not tested with the OTel variables set.
-const hook = (fields: string) => ({ hooks: [{ type: "command", command: `jq -c '{sf:1,t:(now|todate),ev:.hook_event_name${fields}}' > /proc/1/fd/1` }] });
+// A hook never fails a tool call (exit 2 from PreToolUse would block it): jq and write errors are dropped, exit is 0.
+// PostToolUseFailure and PermissionDenied close a call that PostToolUse never reports. Inputs, `tool_use_id` and
+// `duration_ms` as stated on https://code.claude.com/docs/en/hooks, read on 2026-11-13.
+const hook = (fields: string) => ({ hooks: [{ type: "command", command: `{ jq -c '{sf:1,t:(now|todate),ev:.hook_event_name${fields}}' > /proc/1/fd/1; } 2>/dev/null || true` }] });
+const call = ",id:.tool_use_id,tool:.tool_name";
 const activitySettings = JSON.stringify({ hooks: {
-  PreToolUse: [{ matcher: "*", ...hook(",tool:.tool_name,in:(.tool_input|tostring|.[0:80])") }],
-  PostToolUse: [{ matcher: "*", ...hook(",tool:.tool_name,ms:.duration_ms") }],
+  PreToolUse: [{ matcher: "*", ...hook(`${call},in:(.tool_input|tostring|.[0:80])`) }],
+  PostToolUse: [{ matcher: "*", ...hook(`${call},ms:.duration_ms`) }],
+  PostToolUseFailure: [{ matcher: "*", ...hook(`${call},ms:.duration_ms`) }],
+  PermissionDenied: [{ matcher: "*", ...hook(call) }],
   Stop: [hook("")],
 } });
 // The user settings file covers plain `claude -p` and Sandcastle's agent alike. The image ships $HOME/.claude
