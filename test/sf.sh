@@ -75,6 +75,16 @@ printf '#!/bin/sh\nexit 0\n' > "$T/bin/wiz"
 out=$(echo y | "$SF" ratchet 2>&1); rc=$?
 ok "wizard leaves no match: stops" '[ $rc -ne 0 ]'
 
+# a factory file without PORT: stop and name the file
+printf 'GITHUB_REPO=owner/noport\n' > "$T/env/factories/np.env"; git remote set-url origin git@github.com:owner/noport.git
+out=$("$SF" ratchet 2>&1 </dev/null); rc=$?
+ok "no PORT: stops, names the file" '[ $rc -ne 0 ] && grep -qF "$T/env/factories/np.env" <<<"$out" && grep -q PORT <<<"$out" && ! grep -q undefined <<<"$out"'
+rm "$T/env/factories/np.env"; git remote set-url origin git@github.com:owner/repo.git
+
+# one helper builds every event name in sf
+raw=$(grep -n "[\"'\`]factory/" "$(dirname "$SF")/cli/sf.mjs")
+ok "one event-name helper" '[ "$(wc -l <<<"$raw")" = 1 ] && grep -q "const eventName = " <<<"$raw"'
+
 # help and sf new do not look for a factory
 out=$("$SF" help 2>&1 </dev/null); rc=$?
 ok "help needs no factory" '[ $rc -eq 0 ]'

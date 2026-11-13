@@ -19,7 +19,8 @@ const LIMITS = [
   ...(process.env.RUNNER_DNS ?? "1.1.1.1 8.8.8.8").split(/\s+/).filter(Boolean).flatMap((d) => ["--dns", d]),
 ];
 
-const volumes = (runId: string) => ["-v", `run-${runId}-work:/work`, "-v", `run-${runId}-tmp:/tmp`];
+// The first container of a run creates its volumes. The label lets a person list one factory's volumes.
+export const volumes = (runId: string) => ["work", "tmp"].flatMap((v) => ["--mount", `type=volume,src=run-${runId}-${v},dst=/${v},volume-label=${repoLabel()}`]);
 // `-e NAME` with no value copies NAME from our env, so secrets never appear in the process list.
 const envFlags = (vars: Record<string, string>) => Object.keys(vars).flatMap((k) => ["-e", k]);
 

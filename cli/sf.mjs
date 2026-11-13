@@ -256,7 +256,9 @@ const envValue = (file, key) => { try { return fs.readFileSync(file, "utf8").mat
 function findFactory() {
   let files = []; try { files = fs.readdirSync(`${ENV_DIR}/factories`).filter((f) => f.endsWith(".env")).sort(); } catch {}
   const f = files.find((f) => envValue(`${ENV_DIR}/factories/${f}`, "GITHUB_REPO")?.toLowerCase() === repo().toLowerCase());
-  return f && { name: f.slice(0, -4), url: `http://127.0.0.1:${envValue(`${ENV_DIR}/factories/${f}`, "PORT")}` };
+  if (!f) return undefined;
+  const file = `${ENV_DIR}/factories/${f}`, port = envValue(file, "PORT") ?? die(`No PORT in ${file}. Add the factory's port, for example PORT=3001.`);
+  return { name: f.slice(0, -4), url: `http://127.0.0.1:${port}` };
 }
 let FACTORY;
 async function factory() {
@@ -672,10 +674,13 @@ async function architecture() {
 
 const retro = () => claude([], "/retro Review the recent planning sessions and the factory's runs on this repo (issues, PRs, review comments). List findings only. Do not apply any fix. I choose which to accept.");
 
+/** Every event name. The orchestrator's ev() builds the same name. */
+const eventName = (factory, event) => `factory/${factory}/${event}`;
+
 async function sendEvent(event, what) {
   // The event key sits in the shared env file, readable by the user who set up the host.
   const key = process.env.INNGEST_EVENT_KEY ?? envValue(`${ENV_DIR}/common.env`, "INNGEST_EVENT_KEY");
-  const name = `factory/${(await factory()).name}/${event}`;
+  const name = eventName((await factory()).name, event);
   if (!key) die("No INNGEST_EVENT_KEY. Set it in your env, or run sf on the factory host.");
   const r = await fetch(`${INNGEST}/e/${key}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name, data: {} }) })
     .catch((e) => die(`Inngest at ${INNGEST} did not answer (${e.cause?.code ?? e.message}). Is the factory running?`));

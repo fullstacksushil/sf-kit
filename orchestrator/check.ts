@@ -50,7 +50,7 @@ console.log("new task checks ok");
 
 // Multi-factory: event names, the factory name and port checks, the serve origin, the host-wide slot lock.
 import { spawn, spawnSync } from "node:child_process";
-import { readdirSync, readFileSync, writeFileSync, mkdtempSync } from "node:fs";
+import { readdirSync, readFileSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 const { inngest, ev, serveOrigin } = await import("./src/inngest.ts");
 const { ISSUE_LABELS, PR_LABELS, prototypeCommentEvent } = await import("./src/triggers.ts");
@@ -64,6 +64,22 @@ for (const name of [...Object.values(ISSUE_LABELS), ...Object.values(PR_LABELS),
   assert.deepEqual(raw, ["inngest.ts: export const ev = (event: string) => `factory/${FACTORY_NAME}/${event}`;"]);
 }
 assert.equal(serveOrigin(3001), "http://host.docker.internal:3001");
+{ // The server registers with Inngest under the serve origin. A fake Inngest records the register call.
+  const { createServer } = await import("node:http");
+  const bodies: string[] = [];
+  const fake = createServer((q, r) => { let b = ""; q.on("data", (d) => (b += d)); q.on("end", () => { bodies.push(b); r.setHeader("content-type", "application/json"); r.end("{}"); }); });
+  await new Promise<void>((r) => fake.listen(0, "127.0.0.1", r));
+  const free = createServer(); await new Promise<void>((r) => free.listen(0, "127.0.0.1", r));
+  const port = (free.address() as { port: number }).port; free.close();
+  const srv = spawn(process.execPath, ["--import", "tsx", "src/server.ts"], { stdio: ["ignore", "pipe", "inherit"], env: {
+    PATH: process.env.PATH!, FACTORY_NAME: "qf", PORT: String(port), INNGEST_DEV: "0", INNGEST_BASE_URL: `http://127.0.0.1:${(fake.address() as { port: number }).port}`,
+    INNGEST_SIGNING_KEY: `signkey-prod-${"ab".repeat(32)}`, INNGEST_EVENT_KEY: "k", GITHUB_WEBHOOK_SECRET: "s", FACTORY_PAT: "p", GITHUB_REPO: "a/b", CLAUDE_CODE_OAUTH_TOKEN: "t" } });
+  try {
+    await new Promise((r) => srv.stdout!.once("data", r));
+    await fetch(`http://127.0.0.1:${port}/api/inngest`, { method: "PUT" });
+    assert.equal(JSON.parse(bodies[0] ?? "{}").url, `http://host.docker.internal:${port}/api/inngest`, "server.ts must register under serveOrigin()");
+  } finally { srv.kill(); fake.close(); }
+}
 { // The server refuses a bad factory name and a missing port, with a message that names the variable.
   const start = (env: Record<string, string>) => spawnSync(process.execPath, ["--import", "tsx", "src/server.ts"], { env: { PATH: process.env.PATH!, ...env }, encoding: "utf8", timeout: 20000 });
   for (const name of ["", "QF", "1qf", "q_f", "a".repeat(22)]) {
@@ -84,26 +100,35 @@ assert.equal(serveOrigin(3001), "http://host.docker.internal:3001");
   const caller = (n: string) => hostLock(async () => { log.push(`in ${n}`); await new Promise((r) => setTimeout(r, 300)); log.push(`out ${n}`); }, lock);
   await Promise.all([caller("a"), caller("b")]);
   assert.ok(["in a,out a,in b,out b", "in b,out b,in a,out a"].includes(log.join()), log.join());
-  writeFileSync(lock, "999999999"); // a lock left by a dead process
-  assert.equal(await hostLock(async () => 1, lock), 1);
   await assert.rejects(hostLock(async () => { throw new Error("boom"); }, lock));
   assert.equal(await hostLock(async () => 2, lock), 2, "a failed caller frees the lock");
-  writeFileSync(lock, ""); // a holder that died before it wrote anything
-  assert.equal(await hostLock(async () => 3, lock), 3, "an empty lock file does not block");
   // A killed holder releases the lock: the kernel drops it with the holder's process.
   const holder = spawn(process.execPath, ["--import", "tsx", "-e",
     `const { hostLock } = await import("./src/run.ts"); await hostLock(() => { console.log("holding"); return new Promise(() => {}); }, ${JSON.stringify(lock)});`],
     { env: { ...process.env }, stdio: ["ignore", "pipe", "inherit"] });
   await new Promise<void>((res) => holder.stdout!.once("data", () => res()));
   const waiting = hostLock(async () => 4, lock);
-  await new Promise((r) => setTimeout(r, 300));
+  const timer = (ms: number) => new Promise((r) => setTimeout(() => r("timeout"), ms));
+  assert.equal(await Promise.race([waiting, timer(300)]), "timeout", "the waiter must wait while the holder lives");
   holder.kill("SIGKILL");
-  assert.equal(await Promise.race([waiting, new Promise((r) => setTimeout(() => r("timeout"), 5000))]), 4, "a killed holder releases the lock");
+  assert.equal(await Promise.race([waiting, timer(5000)]), 4, "a killed holder releases the lock");
+  // A wait that runs out says so, as a LockTimeout. runAgent treats that like "no slot now" and waits on.
+  const { LockTimeout } = await import("./src/run.ts");
+  let release!: () => void;
+  const held = hostLock(() => new Promise<void>((r) => (release = r)), lock);
+  await new Promise((r) => setTimeout(r, 200));
+  await assert.rejects(hostLock(async () => 5, lock, 1), (e: Error) => e instanceof LockTimeout && /timed out/.test(e.message));
+  release(); await held;
 }
 { // The container label and sf's docker filter both use the lowercased repo.
   process.env.GITHUB_REPO = "Acme/My-App";
   const { repoLabel } = await import("./src/docker.ts");
   assert.equal(repoLabel(), "factory.repo=acme/my-app");
+  const { volumes } = await import("./src/docker.ts");
+  assert.deepEqual(volumes("r1"), [
+    "--mount", "type=volume,src=run-r1-work,dst=/work,volume-label=factory.repo=acme/my-app",
+    "--mount", "type=volume,src=run-r1-tmp,dst=/tmp,volume-label=factory.repo=acme/my-app",
+  ]);
   process.env.GITHUB_REPO = "a/b";
 }
 { // Traces carry the factory name.

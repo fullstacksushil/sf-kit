@@ -48,6 +48,7 @@ write_secret() {
 
 say "Check tools"
 for t in docker node npm openssl sudo; do command -v "$t" >/dev/null || { echo "Missing: $t" >&2; exit 1; }; done
+command -v flock >/dev/null || { echo "Missing: flock (util-linux). The factories on this host share their machine slots through an flock lock." >&2; exit 1; }
 docker compose version >/dev/null || { echo "Missing: docker compose plugin" >&2; exit 1; }
 node -e 'process.exit(+process.versions.node.split(".")[0] >= 22 ? 0 : 1)' || { echo "Need Node 22 or later" >&2; exit 1; }
 id -nG "$ME" | grep -qw docker || echo "Warning: $ME is not in the docker group. The orchestrator service needs it."
