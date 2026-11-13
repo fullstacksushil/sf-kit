@@ -242,6 +242,7 @@ Polling is up to a minute slower. It makes one API call per trigger label a minu
 - Each project needs `npm i -D @ai-hero/sandcastle@^0.14 tsx zod@^3.25`. The agent scripts import all three.
 - `sf`: Node 22 or later, `gh` signed in, and `claude`.
 - The herdr plugin (optional): herdr 0.9.1 or later, `fzf` and Node.
+- A project that is not plain Node: `setup-wizard.sh` asks for a setup command (`RUN_SETUP`) and a runner image (`RUNNER_IMAGE`). Both are optional, and each factory has its own values. Build the image from `factory-runner:latest` and add the project's tools.
 
 ## Limits
 
