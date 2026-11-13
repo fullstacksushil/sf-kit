@@ -1,5 +1,6 @@
 import { Octokit } from "@octokit/rest";
 import { NonRetriableError } from "inngest";
+import { spawn } from "node:child_process";
 import * as docker from "./docker.ts";
 
 export const gh = new Octokit({ auth: process.env.FACTORY_PAT });
@@ -7,7 +8,7 @@ export const [owner, repo] = (process.env.GITHUB_REPO ?? "/").split("/");
 export const remote = `https://github.com/${owner}/${repo}.git`;
 export const ghToken = () => ({ GH_TOKEN: process.env.FACTORY_PAT! });
 
-// Project setup inside the run container. Override per project in orchestrator.env.
+// Project setup inside the run container. Override per project in the factory env file, /etc/factory/factories/<name>.env.
 const SETUP = process.env.RUN_SETUP ?? "npm ci && npm run --if-present db:migrate && npm run --if-present db:seed";
 // Private GitHub repos the project's package.json installs from (for example "acme/shared"), space separated.
 // The token step clones each one to /work/deps. Setup reads them from there, so setup still has no token.
@@ -234,10 +235,39 @@ export async function pushCommits(step: Step, runId: string, branch: string, opt
   return made;
 }
 
+/**
+ * Run fn while this process holds an flock(1) lock on a file that every factory on the host shares.
+ * A child `flock` holds the lock until its stdin closes. The kernel drops the lock when that child or this
+ * process dies, so a dead holder never blocks the others. The file's contents do not matter.
+ */
+// ponytail: fn has no time limit, so a hung fn holds every factory's slot lock. The wait gives up after 5 minutes
+// with a LockTimeout, and runAgent counts that as "no slot now".
+// Needs util-linux flock on the host, and every factory must run as the same user (sticky /tmp refuses others' files).
+export async function hostLock<T>(fn: () => Promise<T>, path = "/tmp/factory-slots.flock", waitSeconds = 300): Promise<T> {
+  // -E 75: a timeout exits 75, apart from flock's own errors (1).
+  const child = spawn("flock", ["-x", "-w", String(waitSeconds), "-E", "75", path, "sh", "-c", "echo held; exec cat"], { stdio: ["pipe", "pipe", "inherit"] });
+  child.stdin.on("error", () => {});
+  await new Promise<void>((res, rej) => {
+    child.stdout.once("data", () => res());
+    child.once("error", rej);
+    child.once("exit", (code) => rej(code === 75
+      ? new LockTimeout(`The wait for the slot lock ${path} timed out after ${waitSeconds} seconds.`)
+      : new Error(`flock on ${path} exited with code ${code} before it held the lock.`)));
+  });
+  try {
+    return await fn();
+  } finally {
+    child.stdin.end();
+  }
+}
+
+export class LockTimeout extends Error {}
+
 let slotQueue: Promise<unknown> = Promise.resolve();
-/** Run fn after every earlier caller's fn has finished. */
+/** Run fn after every earlier caller of this process, under the host lock that the other factories also take. */
+// ponytail: one host-wide cap with no fair share, so one factory can hold every slot. Add per-factory caps if that hurts.
 function slotLock<T>(fn: () => Promise<T>): Promise<T> {
-  const next = slotQueue.then(fn, fn);
+  const next = slotQueue.then(() => hostLock(fn), () => hostLock(fn));
   slotQueue = next.catch(() => {});
   return next;
 }
@@ -257,15 +287,15 @@ export async function runAgent(step: Step, runId: string, prepare: string | null
     await step.run(id("setup"), () => docker.oneShot(runId, setupScript));
   }
 
-  // Wait for a machine slot, then start. Every run's steps execute in this one orchestrator process,
-  // so a process-wide lock makes "count, then start" atomic: two runs cannot both take the last slot.
+  // Wait for a machine slot, then start. The in-process queue and the host lock make "count, then start" atomic
+  // across every factory on the host: two runs cannot both take the last slot.
   for (let i = 0; ; i++) {
     const started = (await step.run(id(`start-agent-${i}`), () => slotLock(async () => {
       if (await docker.agentExists(agent)) return true; // a retry of this step after the start succeeded
       if ((await docker.runningAgents()) >= SLOTS) return false;
       await docker.startAgent(runId, agentScript, docker.agentEnv(runId), subject, agent);
       return true;
-    }))) as boolean;
+    }).catch((e) => { if (e instanceof LockTimeout) return false; throw e; }))) as boolean;
     if (started) break;
     if (i >= 120) throw new Error(`No free machine slot for 2 hours (FACTORY_SLOTS=${SLOTS}).`);
     await step.sleep(id(`wait-slot-${i}`), "1m");

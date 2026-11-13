@@ -1,5 +1,5 @@
 import { NonRetriableError } from "inngest";
-import { inngest } from "../inngest.ts";
+import { inngest, ev } from "../inngest.ts";
 import * as docker from "../docker.ts";
 import {
   agentFiles, blockersFromBody, cloneScript, gh, ghToken, issueNumber, owner, promptAgent, publishFileScript, pushCommits, pushScript, repo,
@@ -87,7 +87,7 @@ run git merge --abort and write the reason to /tmp/merge-failed.md.
 export const specTicket = inngest.createFunction(
   {
     id: "spec-ticket",
-    triggers: { event: "factory/spec-ticket.requested" }, // started by implement-spec with step.invoke
+    triggers: { event: ev("spec-ticket.requested") }, // started by implement-spec with step.invoke
     retries: 1,
     onFailure: resetOnFailure((d) => d.ticket as number),
   },
@@ -127,7 +127,7 @@ export const specTicket = inngest.createFunction(
 export const implementSpec = inngest.createFunction(
   {
     id: "implement-spec",
-    triggers: { event: "factory/implement-spec.requested" },
+    triggers: { event: ev("implement-spec.requested") },
     singleton: { key: "event.data.issueNumber", mode: "skip" },
     retries: 0, // each step is safe to repeat; a failed night ends with a comment on the spec
     onFailure: resetOnFailure((d) => d.issueNumber as number),

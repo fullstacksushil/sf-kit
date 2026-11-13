@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Set up the self-hosted software factory services on this machine (a VPS or a laptop).
 # Installs: Inngest + Postgres + Redis (Docker Compose), optional Phoenix traces, the run network
-# with firewall rules, the runner image, and the orchestrator app as a systemd service.
+# with firewall rules, the runner image, and the orchestrator template unit (one factory per repo).
 # Safe to run again: it never overwrites secrets or existing firewall rules.
 # Design and reasons: README.md in this folder.
 set -euo pipefail
@@ -48,6 +48,7 @@ write_secret() {
 
 say "Check tools"
 for t in docker node npm openssl sudo; do command -v "$t" >/dev/null || { echo "Missing: $t" >&2; exit 1; }; done
+command -v flock >/dev/null || { echo "Missing: flock (util-linux). The factories on this host share their machine slots through an flock lock." >&2; exit 1; }
 docker compose version >/dev/null || { echo "Missing: docker compose plugin" >&2; exit 1; }
 node -e 'process.exit(+process.versions.node.split(".")[0] >= 22 ? 0 : 1)' || { echo "Need Node 22 or later" >&2; exit 1; }
 id -nG "$ME" | grep -qw docker || echo "Warning: $ME is not in the docker group. The orchestrator service needs it."
@@ -72,37 +73,26 @@ PHOENIX_SECRET=$PHOENIX_SECRET
 EOF
 OTEL_LINE="# OTEL_TRACES_ENDPOINT=http://phoenix:6006/v1/traces"
 [ "$OBS" = phoenix ] && OTEL_LINE="OTEL_TRACES_ENDPOINT=http://phoenix:6006/v1/traces"
-write_secret "$ETC/orchestrator.env" <<EOF
+write_secret "$ETC/common.env" <<EOT
+# Host-wide values. Every factory loads this file first. Per-factory values are in $ETC/factories/<name>.env.
 # Inngest (self-hosted). The keys match $ETC/inngest.env.
 INNGEST_DEV=0
 INNGEST_BASE_URL=http://127.0.0.1:8288
-# The URL Inngest (a container) uses to call this app. The host firewall must allow it (next steps, 4).
-INNGEST_SERVE_ORIGIN=http://host.docker.internal:3000
 INNGEST_SIGNING_KEY=$SIGNING_KEY
 INNGEST_EVENT_KEY=$EVENT_KEY
-PORT=3000
-
-# CHANGEME: the repo this factory works on, and its tokens.
-GITHUB_REPO=owner/name
-GITHUB_WEBHOOK_SECRET=$(openssl rand -hex 20)
-# Fine-grained PAT, this repo only: Contents, Pull requests, Issues = read/write.
-FACTORY_PAT=
 # From \`claude setup-token\`.
 CLAUDE_CODE_OAUTH_TOKEN=
-
-# Throttle and project setup. Start with low slots.
+# Slots for all factories together. Start with low slots.
 FACTORY_SLOTS=2
-RUN_MAX_MINUTES=45
-RUN_SETUP="npm ci && npm run --if-present db:migrate && npm run --if-present db:seed"
-# Private GitHub repos that package.json installs from, as owner/repo, space separated. FACTORY_PAT needs
-# Contents: read on each. Setup installs them from local copies and never sees the token.
-RUN_PRIVATE_DEPS=
 
 # Agent traces over OTLP/HTTP. Phoenix: as below. Self-hosted Langfuse:
 #   OTEL_TRACES_ENDPOINT=http://<langfuse-host>:3000/api/public/otel/v1/traces
 #   OTEL_TRACES_HEADERS="Authorization=Basic <base64 of pk-lf-...:sk-lf-...>,x-langfuse-ingestion-version=4"
 $OTEL_LINE
-EOF
+EOT
+# The operator owns this directory, so setup-wizard.sh writes factory files without sudo.
+run sudo mkdir -p "$ETC/factories"
+run sudo chown "$ME" "$ETC/factories"
 
 say "Run network $SUBNET with firewall rules"
 if [ "$DRY" = 1 ] || ! docker network inspect factory-net >/dev/null 2>&1; then
@@ -136,14 +126,15 @@ run cp -r "$KIT/orchestrator/src" "$KIT/orchestrator/package.json" "$KIT/orchest
 run npm --prefix "$OPT/orchestrator" install --omit=dev --no-audit --no-fund
 
 if [ "$SYSTEMD" = 1 ]; then
-  say "systemd service factory-orchestrator"
+  say "systemd template unit factory-orchestrator@.service"
+  UNIT=/etc/systemd/system/factory-orchestrator@.service
   if [ "$DRY" = 1 ]; then
-    echo "+ install $KIT/host/factory-orchestrator.service as /etc/systemd/system/factory-orchestrator.service (User=$ME)"
+    echo "+ install $KIT/host/factory-orchestrator@.service as $UNIT (User=$ME)"
   else
-    sed "s/__USER__/$ME/" "$KIT/host/factory-orchestrator.service" | sudo tee /etc/systemd/system/factory-orchestrator.service >/dev/null
+    sed "s/__USER__/$ME/" "$KIT/host/factory-orchestrator@.service" | sudo tee "$UNIT" >/dev/null
   fi
   run sudo systemctl daemon-reload
-  echo "Not started yet: setup-wizard.sh fills the tokens and starts it."
+  echo "No factory is started. setup-wizard.sh creates each factory and starts it."
 fi
 
 if [ "$OBS" = langfuse ]; then
@@ -156,7 +147,7 @@ Use a separate VM if you can:
   # change every "# CHANGEME" secret: NEXTAUTH_SECRET, SALT, ENCRYPTION_KEY (openssl rand -hex 32) ...
   docker compose up -d
 Then create a project, copy its keys, and set OTEL_TRACES_ENDPOINT and OTEL_TRACES_HEADERS
-in /etc/factory/orchestrator.env (examples are in that file).
+in /etc/factory/common.env (examples are in that file).
 Docs: https://langfuse.com/self-hosting/deployment/docker-compose
 EOF
 fi
@@ -165,9 +156,9 @@ say "Next steps"
 cat <<EOF
 1. Make /webhooks/* public: edit $KIT/host/Caddyfile, then install it in Caddy.
    Laptop: use a tunnel that forwards only /webhooks/* instead.
-2. Run $KIT/setup-wizard.sh. It walks you through the rest and checks each value:
+2. Run $KIT/setup-wizard.sh once for each repo. It creates one factory per repo and checks each value:
    the repo, the GitHub token, the Claude token, optional Langfuse keys, the firewall rule
-   for port 3000, starting the orchestrator, and the GitHub webhook.
+   for ports 3000 to 3099, starting the factory, and the GitHub webhook.
    Without the firewall rule, Inngest logs "dial tcp 172.17.0.1:3000: i/o timeout" and no run starts.
 3. Dashboards: on this machine, open http://localhost:8288 (Inngest) and http://localhost:6006 (Phoenix).
    On a VPS, tunnel them first: ssh -L 8288:localhost:8288 -L 6006:localhost:6006 <you>@<vps-address>

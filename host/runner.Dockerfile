@@ -1,6 +1,6 @@
 # The image every run container uses. Based on the course's .sandcastle/Dockerfile.
 # Add your project's system packages here.
-FROM node:22-bookworm
+FROM node:26-bookworm
 
 RUN apt-get update && apt-get install -y --no-install-recommends git curl jq ca-certificates \
   && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \

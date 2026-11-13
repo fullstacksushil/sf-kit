@@ -1,0 +1,24 @@
+[Unit]
+Description=Software factory orchestrator for %i (Inngest functions + GitHub webhooks)
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+# init-host.sh replaces __USER__ with a user in the docker group.
+User=__USER__
+WorkingDirectory=/opt/factory/orchestrator
+# The shared file loads first. A value in the factory file wins.
+EnvironmentFile=/etc/factory/common.env
+EnvironmentFile=/etc/factory/factories/%i.env
+# FACTORY_NAME is on the command line, so no env file can change it.
+ExecStart=/usr/bin/env FACTORY_NAME=%i npx tsx src/server.ts
+# Register this factory with Inngest. No "-" prefix: a failed sync fails the unit.
+# curl retries every error (a refused connection, any HTTP error) for up to 60 seconds, 10 seconds per try.
+# ${PORT} expansion in Exec lines is from systemd.service(5) "Command lines". curl flags are from curl(1).
+# check: this retry loop has not run under systemd here.
+ExecStartPost=/usr/bin/env curl -f -sS -X PUT --retry 60 --retry-delay 1 --retry-max-time 60 --retry-connrefused --retry-all-errors --max-time 10 http://127.0.0.1:${PORT}/api/inngest
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
