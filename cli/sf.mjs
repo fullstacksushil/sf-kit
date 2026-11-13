@@ -319,6 +319,15 @@ async function factoryUp() {
 }
 
 // ── rendering ────────────────────────────────────────────────────────────
+// check once per process. Never fails: no herdr, a failing herdr or a linked plugin all give no hint.
+let herdrHint;
+function herdrNote() {
+  if (herdrHint === undefined) {
+    const out = tryShell("herdr", ["plugin", "list"]); // check: output format read on 2026-11-13: "- <id> (<name>) enabled [source]"
+    herdrHint = out !== null && !/^- sf /m.test(out) ? c.d(`The herdr plugin lets you pick and follow an agent in herdr: herdr plugin link ${KIT}herdr-plugin`) : "";
+  }
+  return herdrHint;
+}
 function render(st, list, ags) {
   const w = Math.max(60, process.stdout.columns ?? 100);
   const cut = (s, n = w - 4) => (s.length > n ? s.slice(0, n - 1) + "…" : s);
@@ -350,6 +359,7 @@ function render(st, list, ags) {
       for (const l of a.lines) out.push(c.d(`      ${cut(l, w - 8)}`));
     }
   }
+  if (herdrNote()) out.push(herdrNote());
   return out.join("\n");
 }
 
