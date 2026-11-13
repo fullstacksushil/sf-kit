@@ -26,6 +26,12 @@ assert.ok(!/cd repo/.test(pushScript("agent/x", { base: "HEAD" })), "the token p
 console.log("checks ok");
 
 // The new tasks' pure logic.
+{
+  const { openFactoryPr } = await import("./src/run.ts");
+  const prs = [{ number: 1, head: { ref: "agent/issue-320-01ABC" } }, { number: 2, head: { ref: "feature/issue-32-x" } }, { number: 3, head: { ref: "agent/issue-32-01DEF" } }];
+  assert.equal(openFactoryPr(prs, 32)?.number, 3, "finds the PR of issue 32, not of issue 320");
+  assert.equal(openFactoryPr(prs, 3), undefined, "no PR for issue 3");
+}
 const { frontierOf } = await import("./src/functions/implement-spec.ts");
 const { strongCandidates } = await import("./src/functions/architecture.ts");
 const { eventForLabel } = await import("./src/triggers.ts");
@@ -138,3 +144,67 @@ assert.equal(serveOrigin(3001), "http://host.docker.internal:3001");
   delete process.env.OTEL_TRACES_ENDPOINT;
 }
 console.log("multi-factory checks ok");
+
+{ // Every agent container writes the activity hook before the agent runs. A fake docker records the script.
+  const { startAgent } = await import("./src/docker.ts");
+  const { writeFileSync, chmodSync, mkdirSync } = await import("node:fs");
+  const dir = mkdtempSync(`${tmpdir()}/sf-hook-`);
+  writeFileSync(`${dir}/docker`, `#!/bin/sh\nfor a in "$@"; do last="$a"; done\nprintf '%s' "$last" > "${dir}/script"\n`);
+  chmodSync(`${dir}/docker`, 0o755);
+  const path = process.env.PATH;
+  process.env.PATH = `${dir}:${path}`;
+  await startAgent("r1", "echo agent-ran", {}, "issue #1");
+  process.env.PATH = path;
+  const script = readFileSync(`${dir}/script`, "utf8");
+  const home = `${dir}/home`;
+  mkdirSync(home);
+  const run = (h: string) => spawnSync("bash", ["-c", script], { env: { PATH: path!, HOME: h }, encoding: "utf8" });
+  assert.equal(run(home).stdout.trim(), "agent-ran");
+  const hooks = JSON.parse(readFileSync(`${home}/.claude/settings.json`, "utf8")).hooks;
+  // Run each hook command for real. A temp file stands in for the container's stdout.
+  const out = `${dir}/out`;
+  const fire = (ev: string, input: object) => {
+    const cmd: string = hooks[ev][0].hooks[0].command;
+    assert.ok(cmd.includes("> /proc/1/fd/1"), cmd);
+    const r = spawnSync("sh", ["-c", cmd.replace("/proc/1/fd/1", out)], { input: JSON.stringify(input), encoding: "utf8" });
+    assert.equal(r.status, 0, r.stderr);
+    const line = readFileSync(out, "utf8");
+    assert.match(line, /^\{"sf":1,"t":"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ",/);
+    assert.ok(line.endsWith("}\n") && line.split("\n").length === 2, line);
+    return line.replace(/"t":"[^"]*"/, '"t":"T"');
+  };
+  const cmdIn = { command: 'echo "a"\nb' + "x".repeat(100) };
+  const base = { session_id: "s", cwd: "/work/repo", tool_use_id: "u" };
+  // `in` is the most useful value of the input as plain text, cut to 80 characters. A multi-line command stays one line.
+  assert.equal(fire("PreToolUse", { ...base, hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: cmdIn }),
+    `{"sf":1,"t":"T","ev":"PreToolUse","id":"u","tool":"Bash","in":${JSON.stringify(cmdIn.command.slice(0, 80))}}\n`);
+  assert.equal(fire("PreToolUse", { ...base, hook_event_name: "PreToolUse", tool_name: "Read", tool_input: { file_path: "/work/repo/src/a.ts", limit: 20 } }),
+    `{"sf":1,"t":"T","ev":"PreToolUse","id":"u","tool":"Read","in":"/work/repo/src/a.ts"}\n`);
+  assert.equal(fire("PreToolUse", { ...base, hook_event_name: "PreToolUse", tool_name: "Grep", tool_input: { pattern: "x\\|y", path: "src" } }),
+    `{"sf":1,"t":"T","ev":"PreToolUse","id":"u","tool":"Grep","in":"x\\\\|y"}\n`);
+  const odd = { todos: [{ content: "a", status: "pending" }] };
+  assert.equal(fire("PreToolUse", { ...base, hook_event_name: "PreToolUse", tool_name: "TodoWrite", tool_input: odd }),
+    `{"sf":1,"t":"T","ev":"PreToolUse","id":"u","tool":"TodoWrite","in":${JSON.stringify(JSON.stringify(odd))}}\n`);
+  assert.equal(fire("PostToolUse", { ...base, hook_event_name: "PostToolUse", tool_name: "Bash", tool_input: cmdIn, tool_response: {}, duration_ms: 2105 }),
+    `{"sf":1,"t":"T","ev":"PostToolUse","id":"u","tool":"Bash","ms":2105}\n`);
+  // A failed or denied call closes its id too. Input shapes from https://code.claude.com/docs/en/hooks, read on 2026-11-13.
+  assert.equal(fire("PostToolUseFailure", { ...base, hook_event_name: "PostToolUseFailure", tool_name: "Bash", tool_input: cmdIn, error: "Exit code 1", is_interrupt: false, duration_ms: 40 }),
+    `{"sf":1,"t":"T","ev":"PostToolUseFailure","id":"u","tool":"Bash","ms":40,"err":"Exit code 1"}\n`);
+  assert.equal(fire("PermissionDenied", { ...base, hook_event_name: "PermissionDenied", tool_name: "Bash", tool_input: cmdIn, reason: "[x]" }),
+    `{"sf":1,"t":"T","ev":"PermissionDenied","id":"u","tool":"Bash"}\n`);
+  // A hook never fails a tool call: exit 2 from PreToolUse would block it. Bad JSON and an unwritable target both exit 0.
+  for (const ev of Object.keys(hooks)) {
+    const cmd: string = hooks[ev][0].hooks[0].command;
+    assert.equal(spawnSync("sh", ["-c", cmd.replace("/proc/1/fd/1", out)], { input: "{not json", encoding: "utf8" }).status, 0, `${ev} with bad JSON`);
+    assert.equal(spawnSync("sh", ["-c", cmd.replace("/proc/1/fd/1", `${dir}/no/such/dir/out`)], { input: '{"hook_event_name":"Stop"}', encoding: "utf8" }).status, 0, `${ev} with an unwritable target`);
+  }
+  assert.equal(fire("Stop", { ...base, hook_event_name: "Stop", last_assistant_message: "done" }), `{"sf":1,"t":"T","ev":"Stop"}\n`);
+  // An existing user settings file stays as it was. The agent still runs.
+  const home2 = `${dir}/home2`;
+  mkdirSync(`${home2}/.claude`, { recursive: true });
+  writeFileSync(`${home2}/.claude/settings.json`, '{"model":"x"}');
+  const r2 = run(home2);
+  assert.match(r2.stdout, /agent-ran/);
+  assert.equal(readFileSync(`${home2}/.claude/settings.json`, "utf8"), '{"model":"x"}');
+}
+console.log("activity hook checks ok");

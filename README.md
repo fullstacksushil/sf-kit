@@ -19,7 +19,8 @@ flowchart LR
 
 | Path | What it does |
 | --- | --- |
-| `sf` (`cli/sf.mjs`) | The pipeline CLI. It takes an idea from planning to merged pull requests. It shows each running agent's last log lines. |
+| `sf` (`cli/sf.mjs`) | The pipeline CLI. It takes an idea from planning to merged pull requests. It shows the factory's Inngest runs and what each running agent does. |
+| `herdr-plugin/` | An optional [herdr](https://herdr.dev) plugin. It lets you pick a running agent and follow it in a herdr pane. |
 | `init-host.sh` | Prepares a VPS or laptop once. It installs Inngest, Postgres, Redis, optional Phoenix, the run network, firewall rules, the runner image and the template unit for the factories. It writes the shared env file and starts no factory. It never overwrites secrets. |
 | `setup-wizard.sh` | Run it after `init-host.sh`, once for each repo. Each run adds or edits one factory. It asks for the repo, the factory name, the GitHub token, the port, the firewall rule, the start, and webhook or polling. The first run also asks for the Claude token and optional Langfuse keys. It checks each value. |
 | `init-project.sh` | Makes a project ready for the factory. It adds the agent guide files, the tracker doc, the skills and the agent scripts. It never overwrites a file. |
@@ -100,7 +101,7 @@ The docs change with the code. Each ticket the agents get ends with its parent s
 
 `sf` also shows open issues from outside its spec that carry a factory label. When no idea is in progress, run `sf` to see only these issues. `ready-for-agent` marks an issue as ready, but it starts no run. `sf` offers each such issue to the factory and adds `agent:explore` when you say yes. Explore follows the rule in [Security](#security). It takes the label off an issue that fails it and says why in a comment.
 
-While the factory builds, `sf` shows each ticket's status and the agents' last log lines. It stops when:
+While the factory builds, `sf` shows each ticket's status, the factory's runs and the agents' actions. See [What the board shows](#what-the-board-shows). It stops when:
 
 - a PR is ready to merge
 - a ticket needs your decision
@@ -116,6 +117,42 @@ Other commands: `sf new`, `sf status`, `sf watch`, `sf logs <text>`, `sf retro`,
 - **`sf` never merges on its own.** A merge needs two yes answers. The default answer at every stop is "skip".
 - **`sf` needs a terminal.** Without one, it reads one answer per line from stdin and stops when the answers run out. It never answers for you.
 - **The agent view needs Docker access.** `sf` reads the agent containers on the same machine. It shows only the agents of its repo. On another machine, use the Inngest dashboard.
+
+### What the board shows
+
+`sf status` prints the board once. `sf watch` prints it again every 10 seconds. Below the tickets come two blocks.
+
+**Runs.** This block lists the factory's Inngest runs that are running or queued, at most 10. It leaves out `github-poll`. A run in prepare, setup, push or a wait for a slot has no agent container, so only this block shows it. Each row has these parts:
+
+- the function name, and `#<n>` or `PR #<n>` when the run's event names an issue or a PR
+- the step: `last step <name> ended <time> ago`, else `queued` or `starting`
+- `run <time>`: the time since the run started
+
+On 2026-11-13, the trace of a running run on this host listed only finished steps. So the row names the last finished step, not the step that runs now. When Inngest does not answer in 2 seconds, or has no app for the factory, the block is one dim line. The board does not stop.
+
+**Agents.** This block lists each agent container of the repo. The first row has the subject, the age and a `sf logs '<subject>'` command that you can paste into a shell. The rows below it come from a hook in the agent container:
+
+- `now <tool> <input> · <time>`: the tool call that runs now
+- up to 3 `done` or `fail` rows, newest first, with the duration of each call, or `denied`
+- `finishing: the agent stopped`, after the agent's `Stop` event
+
+The orchestrator writes the hook into `$HOME/.claude/settings.json` before the agent starts. The hook writes one JSON line for each tool call to the container log. Only agents that the current orchestrator code started have the hook. For an older container, the block shows its last 4 log lines.
+
+### Follow one agent
+
+`sf logs <text>` follows the log of one agent. An exact subject wins. Part of a subject works when only one agent matches. When several agents match, `sf` lists them and stops. `sf logs --container <container name>` follows one agent container by name and works from any folder. Activity lines show as one readable line each, with the time. When Sandcastle prints its own block for a Bash call, `sf` shows only the activity line for that call. `sf` prints the other log lines too, with escape and control characters removed.
+
+### The herdr plugin
+
+If you work in [herdr](https://herdr.dev), the plugin in `herdr-plugin/` gives you a picker of the running agents. Link it once:
+
+```bash
+herdr plugin link <path to sf-kit>/herdr-plugin
+```
+
+When herdr is on the `PATH` and the plugin is not linked, the board prints this command with the path filled in. `sf` never links the plugin itself.
+
+The plugin has one action, "Watch a factory agent" (`watch-agent`). It opens a popup with the running factory agents of all repos on this machine: subject, repo and age. Pick one, and a new tab pane runs `sf logs --container <container name>`. That command follows one container from any folder, so the plugin needs no project folder. It needs `fzf` and `node`.
 
 ## What the factory runs
 
@@ -204,6 +241,9 @@ Polling is up to a minute slower. It makes one API call per trigger label a minu
 - Project: `gh` for `--labels`. `init-project.sh` copies the skills and agent scripts from a clone at `../cohort-005-project`. The clone needs the `live-run-through` branch.
 - Each project needs `npm i -D @ai-hero/sandcastle@^0.14 tsx zod@^3.25`. The agent scripts import all three.
 - `sf`: Node 22 or later, `gh` signed in, and `claude`.
+- The herdr plugin (optional): herdr 0.9.1 or later, `fzf` and Node.
+- A project that is not plain Node: `setup-wizard.sh` asks for a setup command (`RUN_SETUP`) and a runner image (`RUNNER_IMAGE`). Both are optional, and each factory has its own values. Build the image from `factory-runner:latest` and add the project's tools.
+- One open factory PR per ticket: an implement run does not start when the ticket has an open `agent/issue-<n>-...` PR. It removes `agent:implement` and says so in a comment. Close the PR to build again. `sf` also reads the labels again before a retry, so an old retry prompt does not start a second run.
 
 ## Limits
 
@@ -220,3 +260,8 @@ Polling is up to a minute slower. It makes one API call per trigger label a minu
 - The runner image is about 3.2 GB, because it holds Chrome for screenshots.
 - Review refuses PRs whose head is the base or default branch, and branch names outside `A-Z a-z 0-9 . _ / -`. It labels them `agent:blocked` with a comment. Rebase skips the same PRs.
 - `sf` reads blocking edges from each ticket's `## Blocked by` section, and from GitHub's dependency API every 5 minutes.
+- The agent view reads the last 200 lines of each agent log. A run with much Sandcastle output between the activity lines shows fewer finished calls.
+- The first 80 characters of each tool input are in the agent's `docker logs`. Anyone with Docker access on the host can read them.
+- A call that a permission dialog denies, or that a `PreToolUse` hook blocks, sends no event to the hook. Source: the [hooks docs](https://code.claude.com/docs/en/hooks), read on 2026-11-13. The call stays `now` until the agent stops.
+- If the image or a start script puts a `$HOME/.claude/settings.json` in the agent container, the orchestrator keeps it. That agent then runs without the hook and prints `sf: ... exists, no activity hook` to its log.
+- The runs block never showed a step that runs now. The code has a row for one, but that row rests on a trace shape that nobody saw. The block reads runs queued in the last 7 days.

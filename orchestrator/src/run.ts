@@ -151,6 +151,9 @@ export const specFileScript = (spec: number) => `
   ${trustedIssueScript(String(issueNumber(spec)))}
 `;
 
+/** The open pull request a factory run made for this issue, or undefined. Implementer branches are `agent/issue-<n>-<run id>`. */
+export const openFactoryPr = <T extends { head: { ref: string } }>(prs: T[], issue: number) => prs.find((p) => p.head.ref.startsWith(`agent/issue-${issue}-`));
+
 /** Blockers from a ticket body's "## Blocked by" section (the sf convention, see docs/agents/issue-tracker.md). */
 export function blockersFromBody(body = ""): number[] {
   const sec = body.match(/##\s*Blocked by\s*\n([\s\S]*?)(\n##\s|$)/i)?.[1] ?? body.match(/^Blocked by:(.*)$/im)?.[1] ?? "";

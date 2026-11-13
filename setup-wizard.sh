@@ -320,6 +320,24 @@ while :; do
   warn "Not owner/name:$bad"
 done
 write_env RUN_PRIVATE_DEPS "$RUN_PRIVATE_DEPS"
+# Both values are optional. With no line in the env file, the orchestrator uses its own default
+# (RUN_SETUP in orchestrator/src/run.ts, RUNNER_IMAGE in orchestrator/src/docker.ts).
+say "Each run installs the project before the agent starts. The default is npm ci, then db:migrate and db:seed when present."
+ask RUN_SETUP "Setup command (Enter for the default):" || RUN_SETUP=""
+[[ -n "$RUN_SETUP" ]] && write_env RUN_SETUP "$RUN_SETUP"
+say "Runs use the image factory-runner:latest. A project that needs more tools (Rust, Python) builds its own image."
+while :; do
+  ask RUNNER_IMAGE "Runner image (Enter for the default):" || RUNNER_IMAGE=""
+  [[ -z "$RUNNER_IMAGE" || "$RUNNER_IMAGE" =~ ^[a-z0-9][a-z0-9._/:-]*$ ]] && break
+  warn "Not an image name: $RUNNER_IMAGE"; RUNNER_IMAGE=""
+done
+if [[ -n "$RUNNER_IMAGE" ]]; then
+  write_env RUNNER_IMAGE "$RUNNER_IMAGE"
+  docker image inspect "$RUNNER_IMAGE" >/dev/null 2>&1 || {
+    warn "Docker has no image $RUNNER_IMAGE on this host. Runs fail until you build it:"
+    note "docker build -t $RUNNER_IMAGE -f <your Dockerfile> <its folder>"
+  }
+fi
 
 # ── GitHub token ──────────────────────────────────────────────────────────
 stage "GitHub token (FACTORY_PAT)"

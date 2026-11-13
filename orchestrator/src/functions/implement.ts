@@ -1,6 +1,6 @@
 import { inngest, ev } from "../inngest.ts";
 import * as docker from "../docker.ts";
-import { agentFiles, cloneScript, gh, ghToken, issueNumber, owner, pushCommits, repo, resetOnFailure, runAgent, statusTag, ticketScript } from "../run.ts";
+import { agentFiles, cloneScript, gh, ghToken, issueNumber, owner, openFactoryPr, pushCommits, repo, resetOnFailure, runAgent, statusTag, ticketScript } from "../run.ts";
 
 export const implementTicket = inngest.createFunction(
   {
@@ -15,6 +15,19 @@ export const implementTicket = inngest.createFunction(
   async ({ event, step, runId }) => {
     const n = issueNumber(event.data.issueNumber);
     const branch = `agent/issue-${n}-${runId}`;
+
+    // A second run for a ticket that already has an open factory PR would open a second PR. The poller starts one
+    // when the label is added during a run: the singleton skips that event, the label stays, and the next poll sends it again.
+    // ponytail: reads the first 100 open PRs. Page through them when a repo holds more.
+    const open = await step.run("check-open-pr", async () => {
+      const pr = openFactoryPr((await gh.pulls.list({ owner, repo, state: "open", per_page: 100 })).data, n);
+      if (!pr) return null;
+      await gh.issues.removeLabel({ owner, repo, issue_number: n, name: "agent:implement" }).catch(() => {});
+      await gh.issues.createComment({ owner, repo, issue_number: n,
+        body: `Not started: PR #${pr.number} is open for this ticket. Close it to build again, or label the PR \`agent:review\` or \`agent:rebase\`.${statusTag}` });
+      return pr.number;
+    });
+    if (open) return { skipped: `PR #${open} is open` };
 
     await step.run("mark-in-progress", async () => {
       await gh.issues.removeLabel({ owner, repo, issue_number: n, name: "agent:implement" }).catch(() => {});

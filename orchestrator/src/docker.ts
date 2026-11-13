@@ -45,6 +45,34 @@ export async function oneShot(runId: string, script: string, vars: Record<string
 /** sf filters on this label. GitHub ignores case in repo names, so the value is lowercase. */
 export const repoLabel = () => `factory.repo=${(process.env.GITHUB_REPO ?? "").toLowerCase()}`;
 
+// The activity line `sf` reads: one JSON object per hook event on the container's stdout. "sf":1 comes first.
+// Hook stderr stays inside Claude Code, so the hook writes to process 1's stdout, which is the `docker logs` stream.
+// check: tested with the image's jq and no --init (process 1 is the start script). Not tested with the OTel variables set.
+// A hook never fails a tool call (exit 2 from PreToolUse would block it): jq and write errors are dropped, exit is 0.
+// PostToolUseFailure and PermissionDenied close a call that PostToolUse never reports. Inputs, `tool_use_id` and
+// `duration_ms` as stated on https://code.claude.com/docs/en/hooks, read on 2026-11-13.
+const hook = (fields: string) => ({ hooks: [{ type: "command", command: `{ jq -c '{sf:1,t:(now|todate),ev:.hook_event_name${fields}}' > /proc/1/fd/1; } 2>/dev/null || true` }] });
+const call = ",id:.tool_use_id,tool:.tool_name";
+// `in`: the most useful single value of the input as plain text, else the input as JSON. Cut to 80 characters.
+const input = "(.tool_input as $i | (($i | objects | .command // .file_path // .pattern // .url // .description) // ($i | tostring)) | tostring | .[0:80])";
+const activitySettings = JSON.stringify({ hooks: {
+  PreToolUse: [{ matcher: "*", ...hook(`${call},in:${input}`) }],
+  PostToolUse: [{ matcher: "*", ...hook(`${call},ms:.duration_ms`) }],
+  // `err`: the start of the error text, so `sf logs` can say why a call failed.
+  PostToolUseFailure: [{ matcher: "*", ...hook(`${call},ms:.duration_ms,err:((.error // "") | tostring | .[0:120])`) }],
+  PermissionDenied: [{ matcher: "*", ...hook(call) }],
+  Stop: [hook("")],
+} });
+// The user settings file covers plain `claude -p` and Sandcastle's agent alike. The image ships $HOME/.claude
+// without a settings.json and no start script writes one. If one is there, it stays and the agent runs without the hook.
+// check: a --settings file next to this user file was not tested. The hook can fire two times.
+const activityHook = `if [ -e "$HOME/.claude/settings.json" ]; then echo "sf: $HOME/.claude/settings.json exists, no activity hook"
+else mkdir -p "$HOME/.claude" && cat > "$HOME/.claude/settings.json" <<'SF_HOOKS'
+${activitySettings}
+SF_HOOKS
+fi
+`;
+
 /** Start the agent in the background and return at once. */
 // One run can start several agents (implement-spec: decompose, notes, merges). `agent` names the container,
 // `runId` names the volumes they share.
@@ -52,7 +80,7 @@ export async function startAgent(runId: string, script: string, vars: Record<str
   // The labels let `sf` show which ticket or PR each running agent of its repo works on.
   await exec(
     "docker",
-    ["run", "-d", "--name", `agent-${agent}`, "--label", `factory.subject=${subject}`, "--label", repoLabel(), ...LIMITS, ...envFlags(vars), ...volumes(runId), "-w", "/work/repo", IMAGE, "bash", "-c", script],
+    ["run", "-d", "--name", `agent-${agent}`, "--label", `factory.subject=${subject}`, "--label", repoLabel(), ...LIMITS, ...envFlags(vars), ...volumes(runId), "-w", "/work/repo", IMAGE, "bash", "-c", activityHook + script],
     { env: { ...process.env, ...vars } },
   );
 }
