@@ -1,13 +1,14 @@
+import { ev } from "./inngest.ts";
 // One table of trigger labels for the webhook and the poller, so both start the same runs.
 export const ISSUE_LABELS: Record<string, string> = {
-  "agent:explore": "factory/explore.requested",
-  "agent:implement": "factory/implement.requested",
-  "agent:prototype": "factory/prototype.requested",
-  "agent:implement-spec": "factory/implement-spec.requested",
+  "agent:explore": ev("explore.requested"),
+  "agent:implement": ev("implement.requested"),
+  "agent:prototype": ev("prototype.requested"),
+  "agent:implement-spec": ev("implement-spec.requested"),
 };
 export const PR_LABELS: Record<string, string> = {
-  "agent:review": "factory/review.requested",
-  "agent:rebase": "factory/rebase.requested",
+  "agent:review": ev("review.requested"),
+  "agent:rebase": ev("rebase.requested"),
 };
 
 /** The event a label starts, or null. Issue events carry issueNumber, PR events prNumber. */
@@ -20,4 +21,4 @@ export function eventForLabel(label: string, number: number, isPr: boolean) {
 
 /** A new prototype version, from a comment. The id makes Inngest drop the duplicate when webhook and poller both see it. */
 export const prototypeCommentEvent = (issueNumber: number, commentId: number) =>
-  ({ id: `prototype-comment-${commentId}`, name: "factory/prototype.requested", data: { issueNumber } });
+  ({ id: `prototype-comment-${commentId}`, name: ev("prototype.requested"), data: { issueNumber } });

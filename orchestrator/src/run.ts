@@ -1,5 +1,7 @@
 import { Octokit } from "@octokit/rest";
 import { NonRetriableError } from "inngest";
+import { open, readFile, unlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import * as docker from "./docker.ts";
 
 export const gh = new Octokit({ auth: process.env.FACTORY_PAT });
@@ -234,10 +236,46 @@ export async function pushCommits(step: Step, runId: string, branch: string, opt
   return made;
 }
 
+/**
+ * Run fn while this process holds a lock file that every factory on the host shares.
+ * The file holds the holder's pid. A lock whose process is gone is stale and gets removed.
+ */
+export async function hostLock<T>(fn: () => Promise<T>, path = `${tmpdir()}/factory-slots.lock`): Promise<T> {
+  for (;;) {
+    try {
+      const f = await open(path, "wx");
+      await f.writeFile(String(process.pid));
+      await f.close();
+      break;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+      const pid = Number(await readFile(path, "utf8").catch(() => ""));
+      // The holder writes its pid just after it creates the file, so an empty file is not stale yet.
+      if (pid && pid !== process.pid && !alive(pid)) await unlink(path).catch(() => {});
+      else await new Promise((r) => setTimeout(r, 100));
+    }
+  }
+  try {
+    return await fn();
+  } finally {
+    await unlink(path).catch(() => {});
+  }
+}
+
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
 let slotQueue: Promise<unknown> = Promise.resolve();
-/** Run fn after every earlier caller's fn has finished. */
+/** Run fn after every earlier caller of this process, under the host lock that the other factories also take. */
+// ponytail: one host-wide cap with no fair share, so one factory can hold every slot. Add per-factory caps if that hurts.
 function slotLock<T>(fn: () => Promise<T>): Promise<T> {
-  const next = slotQueue.then(fn, fn);
+  const next = slotQueue.then(() => hostLock(fn), () => hostLock(fn));
   slotQueue = next.catch(() => {});
   return next;
 }
@@ -257,8 +295,8 @@ export async function runAgent(step: Step, runId: string, prepare: string | null
     await step.run(id("setup"), () => docker.oneShot(runId, setupScript));
   }
 
-  // Wait for a machine slot, then start. Every run's steps execute in this one orchestrator process,
-  // so a process-wide lock makes "count, then start" atomic: two runs cannot both take the last slot.
+  // Wait for a machine slot, then start. The in-process queue and the host lock make "count, then start" atomic
+  // across every factory on the host: two runs cannot both take the last slot.
   for (let i = 0; ; i++) {
     const started = (await step.run(id(`start-agent-${i}`), () => slotLock(async () => {
       if (await docker.agentExists(agent)) return true; // a retry of this step after the start succeeded
