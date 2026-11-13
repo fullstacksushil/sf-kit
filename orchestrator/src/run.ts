@@ -1,7 +1,6 @@
 import { Octokit } from "@octokit/rest";
 import { NonRetriableError } from "inngest";
-import { open, readFile, unlink } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { spawn } from "node:child_process";
 import * as docker from "./docker.ts";
 
 export const gh = new Octokit({ auth: process.env.FACTORY_PAT });
@@ -9,7 +8,7 @@ export const [owner, repo] = (process.env.GITHUB_REPO ?? "/").split("/");
 export const remote = `https://github.com/${owner}/${repo}.git`;
 export const ghToken = () => ({ GH_TOKEN: process.env.FACTORY_PAT! });
 
-// Project setup inside the run container. Override per project in orchestrator.env.
+// Project setup inside the run container. Override per project in the factory env file, /etc/factory/factories/<name>.env.
 const SETUP = process.env.RUN_SETUP ?? "npm ci && npm run --if-present db:migrate && npm run --if-present db:seed";
 // Private GitHub repos the project's package.json installs from (for example "acme/shared"), space separated.
 // The token step clones each one to /work/deps. Setup reads them from there, so setup still has no token.
@@ -237,37 +236,24 @@ export async function pushCommits(step: Step, runId: string, branch: string, opt
 }
 
 /**
- * Run fn while this process holds a lock file that every factory on the host shares.
- * The file holds the holder's pid. A lock whose process is gone is stale and gets removed.
+ * Run fn while this process holds an flock(1) lock on a file that every factory on the host shares.
+ * A child `flock` holds the lock until its stdin closes. The kernel drops the lock when that child or this
+ * process dies, so a dead holder never blocks the others. The file's contents do not matter.
  */
-export async function hostLock<T>(fn: () => Promise<T>, path = `${tmpdir()}/factory-slots.lock`): Promise<T> {
-  for (;;) {
-    try {
-      const f = await open(path, "wx");
-      await f.writeFile(String(process.pid));
-      await f.close();
-      break;
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-      const pid = Number(await readFile(path, "utf8").catch(() => ""));
-      // The holder writes its pid just after it creates the file, so an empty file is not stale yet.
-      if (pid && pid !== process.pid && !alive(pid)) await unlink(path).catch(() => {});
-      else await new Promise((r) => setTimeout(r, 100));
-    }
-  }
+// ponytail: fn has no time limit, so a hung fn holds every factory's slot lock. The wait gives up after 5 minutes.
+// Needs util-linux flock on the host, and every factory must run as the same user (sticky /tmp refuses others' files).
+export async function hostLock<T>(fn: () => Promise<T>, path = "/tmp/factory-slots.flock"): Promise<T> {
+  const child = spawn("flock", ["-x", "-w", "300", path, "sh", "-c", "echo held; exec cat"], { stdio: ["pipe", "pipe", "inherit"] });
+  child.stdin.on("error", () => {});
+  await new Promise<void>((res, rej) => {
+    child.stdout.once("data", () => res());
+    child.once("error", rej);
+    child.once("exit", (code) => rej(new Error(`flock on ${path} exited with code ${code} before it held the lock.`)));
+  });
   try {
     return await fn();
   } finally {
-    await unlink(path).catch(() => {});
-  }
-}
-
-function alive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (e) {
-    return (e as NodeJS.ErrnoException).code === "EPERM";
+    child.stdin.end();
   }
 }
 

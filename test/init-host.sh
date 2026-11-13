@@ -29,6 +29,8 @@ u "EnvironmentFile=/etc/factory/factories/%i.env"
 u "FACTORY_NAME=%i"
 u "ExecStartPost=/usr/bin/env curl -f"
 u "--retry-connrefused"
+u "--retry-all-errors"
+u "--max-time"
 grep -q '^ExecStartPost=-' "$U" && { echo "FAIL: ExecStartPost has - prefix"; FAIL=1; }
 grep -q -- '--sdk-url' "$KIT/host/compose.yaml" && { echo "FAIL: compose has --sdk-url"; FAIL=1; }
 [ "$FAIL" = 0 ] && echo "init-host test: ok"; exit "$FAIL"

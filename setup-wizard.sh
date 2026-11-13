@@ -214,7 +214,7 @@ finish() {
 ENV_DIR="${ENV_DIR:-/etc/factory}"
 COMMON="$ENV_DIR/common.env"     # host-wide values: Inngest, Claude token, slots, traces
 FACTORIES="$ENV_DIR/factories"   # one <factory name>.env per factory
-NAME_RULE='^[a-z][a-z0-9-]{0,20}$'   # same rule as orchestrator/src/server.ts
+NAME_RULE='^[a-z][a-z0-9-]{0,20}$'   # same rule as orchestrator/src/inngest.ts
 
 # ask_default VAR "Prompt" DEFAULT reads a value into $VAR. Enter takes DEFAULT. Stops the wizard at EOF.
 ask_default() {

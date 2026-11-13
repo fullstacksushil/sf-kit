@@ -49,7 +49,7 @@ assert.throws(() => pushScript("agent/x", { base: "main", leaseSha: "nope" }));
 console.log("new task checks ok");
 
 // Multi-factory: event names, the factory name and port checks, the serve origin, the host-wide slot lock.
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { readdirSync, readFileSync, writeFileSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 const { inngest, ev, serveOrigin } = await import("./src/inngest.ts");
@@ -88,6 +88,23 @@ assert.equal(serveOrigin(3001), "http://host.docker.internal:3001");
   assert.equal(await hostLock(async () => 1, lock), 1);
   await assert.rejects(hostLock(async () => { throw new Error("boom"); }, lock));
   assert.equal(await hostLock(async () => 2, lock), 2, "a failed caller frees the lock");
+  writeFileSync(lock, ""); // a holder that died before it wrote anything
+  assert.equal(await hostLock(async () => 3, lock), 3, "an empty lock file does not block");
+  // A killed holder releases the lock: the kernel drops it with the holder's process.
+  const holder = spawn(process.execPath, ["--import", "tsx", "-e",
+    `const { hostLock } = await import("./src/run.ts"); await hostLock(() => { console.log("holding"); return new Promise(() => {}); }, ${JSON.stringify(lock)});`],
+    { env: { ...process.env }, stdio: ["ignore", "pipe", "inherit"] });
+  await new Promise<void>((res) => holder.stdout!.once("data", () => res()));
+  const waiting = hostLock(async () => 4, lock);
+  await new Promise((r) => setTimeout(r, 300));
+  holder.kill("SIGKILL");
+  assert.equal(await Promise.race([waiting, new Promise((r) => setTimeout(() => r("timeout"), 5000))]), 4, "a killed holder releases the lock");
+}
+{ // The container label and sf's docker filter both use the lowercased repo.
+  process.env.GITHUB_REPO = "Acme/My-App";
+  const { repoLabel } = await import("./src/docker.ts");
+  assert.equal(repoLabel(), "factory.repo=acme/my-app");
+  process.env.GITHUB_REPO = "a/b";
 }
 { // Traces carry the factory name.
   process.env.OTEL_TRACES_ENDPOINT = "http://phoenix:6006/v1/traces";
