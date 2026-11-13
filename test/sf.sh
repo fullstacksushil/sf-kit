@@ -99,6 +99,7 @@ ok "sf new prints wizard command with --repo" 'grep -q -- "--repo" <<<"$(grep -n
 mkdir -p "$T/logs" "$T/repo/.sandcastle/agent-workflows" "$T/repo/.claude/skills/grill-with-docs"
 printf 'a1\towner/repo#1\t1m\na2\towner/repo#2\t3m\na3\towner/repo#3\t2m\na4\towner/repo#4\t9m\na5\towner/repo#5\t1m\n' > "$T/ps"
 printf 'a6\towner/repo#6\t1m\na7\towner/repo#7\t1m\na8\towner/repo#8\t1m\na9\towner/repo#9\t1m\n' >> "$T/ps"
+printf 'a11\towner/repo#11\t1m\n' >> "$T/ps"
 now5=$(date -u -d '-5 sec' +%Y-%m-%dT%H:%M:%SZ)
 pre() { printf '{"sf":1,"t":"2026-11-13T15:25:0%sZ","ev":"PreToolUse","tool":"%s","in":"%s"}\n' "$1" "$2" "$3"; }
 post() { printf '{"sf":1,"t":"2026-11-13T15:25:0%sZ","ev":"PostToolUse","tool":"%s","ms":%s}\n' "$1" "$2" "$3"; }
@@ -118,6 +119,7 @@ endi() { printf '{"sf":1,"t":"2026-11-13T15:25:0%sZ","ev":"%s","id":"%s","tool":
 { prei 1 h1 Bash hang; prei 2 h2 Bash 'echo b'; endi 3 PostToolUse h2 Bash 30; prei 4 h3 Bash 'echo c'; endi 5 PostToolUse h3 Bash 40; } > "$T/logs/a7"
 { cat "$T/logs/a7"; printf '{"sf":1,"t":"2026-11-13T15:25:06Z","ev":"Stop"}\n'; } > "$T/logs/a8"
 { prei 1 f1 Bash fails; endi 2 PostToolUseFailure f1 Bash 20; prei 3 f2 Bash rm; printf '{"sf":1,"t":"2026-11-13T15:25:04Z","ev":"PermissionDenied","id":"f2","tool":"Bash"}\n'; } > "$T/logs/a9"
+pre 1 Bash 'npm test \\\n    \t&& npm run lint' > "$T/logs/a11"  # a multi-line command, as the hook writes it since L1
 printf '{"sf":1,"t":"2026-11-13T15:25:01Z","ev":"PreToolUse","tool":"Bash\\u001b[31m","in":"\\u001b]0;pwned\\u0007\\u001b[31mrm -rf /\\u001b[0m\\r\\nnext"}\n' > "$T/logs/a5"
 
 board=$(cd "$T/repo" && "$SF" 2>&1 </dev/null | sed 's/\x1b\[[0-9;]*m//g')
@@ -134,6 +136,7 @@ ok "ids: parallel calls of one tool finish out of order" 'agent 6 | grep -Eq "do
 ok "ids: a call that never finishes, later calls of its tool" 'agent 7 | grep -Eq "now  Bash +hang" && agent 7 | grep -Eq "Bash +echo b · 30ms" && agent 7 | grep -Eq "Bash +echo c · 40ms"'
 ok "ids: Stop closes the open call" 'agent 8 | grep -q finishing && ! agent 8 | grep -q "now"'
 ok "ids: a failed and a denied call are closed" 'agent 9 | grep -Eq "fail Bash +fails · 20ms" && agent 9 | grep -Eq "fail Bash +rm · denied" && ! agent 9 | grep -q "now"'
+ok "multi-line input on one line" 'agent 11 | grep -Eq "Bash +npm test \\\\ && npm run lint · "'
 ok "escapes: text shown" 'agent 5 | grep -q "rm -rf /"'
 ok "escapes: stripped" '! grep -q $'"'"'\x07'"'"' <<<"$raw" && ! grep -qF $'"'"'\x1b]'"'"' <<<"$raw" && ! grep -qF $'"'"'\x1b[31m'"'"' <<<"$raw"'
 : > "$T/docker.log"

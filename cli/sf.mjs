@@ -247,7 +247,8 @@ const shellWord = (s) => `'${clean(s).replace(/'/g, `'\\''`)}'`;
 // An activity line, written by the agent container's hook: {"sf":1,"t":...,"ev":...}. Other JSON is not one.
 const activityLine = (l) => { if (!l.startsWith('{"sf":1,')) return null; try { return JSON.parse(l); } catch { return null; } };
 const dur = (ms) => (!Number.isFinite(ms) ? "?" : ms < 1000 ? `${Math.round(ms)}ms` : ms < 60_000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.floor(ms / 60_000)}m${String(Math.floor(ms / 1000) % 60).padStart(2, "0")}s`);
-const action = (e) => `${clean(e.tool).padEnd(6)} ${clean(e.in).trim()}`;
+// A multi-line value (a heredoc, a long command) shows on one line: each whitespace run is one space.
+const action = (e) => `${clean(e.tool).padEnd(6)} ${clean(e.in).replace(/\s+/g, " ").trim()}`;
 /** Current action (the last open PreToolUse), the last 3 closed ones, and Stop. Stop closes every open call. */
 const CLOSE = new Set(["PostToolUse", "PostToolUseFailure", "PermissionDenied"]);
 function activity(events) {
