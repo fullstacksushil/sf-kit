@@ -133,7 +133,22 @@ DOCS
   place_tree "$tmp/.agents" "$TARGET/.agents"
   place_tree "$tmp/.sandcastle" "$TARGET/.sandcastle"
   # Claude Code reads skills from .claude/skills. The course repo links it to .agents/skills.
-  if [ ! -e .claude/skills ]; then
+  # A brownfield project can have its own skills there: move them to .agents/skills first. A name clash stops the move.
+  own_skills=0
+  if [ -d .claude/skills ] && [ ! -L .claude/skills ]; then
+    clash=""
+    for s in .claude/skills/*; do
+      [ -e "$s" ] || continue
+      if [ -e ".agents/skills/${s##*/}" ] || [ -e "$tmp/.agents/skills/${s##*/}" ]; then clash+=" ${s##*/}"; fi
+    done
+    if [ -n "$clash" ]; then echo "Kept .claude/skills: these skills are also in .agents/skills:$clash. Move them by hand."
+    else
+      own_skills=1
+      CREATED+=("$TARGET/.claude/skills/* moved to .agents/skills/")
+      [ "$DRY" = 1 ] || { mkdir -p .agents/skills; find .claude/skills -mindepth 1 -maxdepth 1 -exec mv -t .agents/skills/ {} +; rmdir .claude/skills; }
+    fi
+  fi
+  if [ ! -e .claude/skills ] || { [ "$DRY" = 1 ] && [ "$own_skills" = 1 ]; }; then
     CREATED+=("$TARGET/.claude/skills -> ../.agents/skills")
     [ "$DRY" = 1 ] || { mkdir -p .claude && ln -s ../.agents/skills .claude/skills; }
   fi
