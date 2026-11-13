@@ -26,6 +26,12 @@ assert.ok(!/cd repo/.test(pushScript("agent/x", { base: "HEAD" })), "the token p
 console.log("checks ok");
 
 // The new tasks' pure logic.
+{
+  const { openFactoryPr } = await import("./src/run.ts");
+  const prs = [{ number: 1, head: { ref: "agent/issue-320-01ABC" } }, { number: 2, head: { ref: "feature/issue-32-x" } }, { number: 3, head: { ref: "agent/issue-32-01DEF" } }];
+  assert.equal(openFactoryPr(prs, 32)?.number, 3, "finds the PR of issue 32, not of issue 320");
+  assert.equal(openFactoryPr(prs, 3), undefined, "no PR for issue 3");
+}
 const { frontierOf } = await import("./src/functions/implement-spec.ts");
 const { strongCandidates } = await import("./src/functions/architecture.ts");
 const { eventForLabel } = await import("./src/triggers.ts");
@@ -183,7 +189,7 @@ console.log("multi-factory checks ok");
     `{"sf":1,"t":"T","ev":"PostToolUse","id":"u","tool":"Bash","ms":2105}\n`);
   // A failed or denied call closes its id too. Input shapes from https://code.claude.com/docs/en/hooks, read on 2026-11-13.
   assert.equal(fire("PostToolUseFailure", { ...base, hook_event_name: "PostToolUseFailure", tool_name: "Bash", tool_input: cmdIn, error: "Exit code 1", is_interrupt: false, duration_ms: 40 }),
-    `{"sf":1,"t":"T","ev":"PostToolUseFailure","id":"u","tool":"Bash","ms":40}\n`);
+    `{"sf":1,"t":"T","ev":"PostToolUseFailure","id":"u","tool":"Bash","ms":40,"err":"Exit code 1"}\n`);
   assert.equal(fire("PermissionDenied", { ...base, hook_event_name: "PermissionDenied", tool_name: "Bash", tool_input: cmdIn, reason: "[x]" }),
     `{"sf":1,"t":"T","ev":"PermissionDenied","id":"u","tool":"Bash"}\n`);
   // A hook never fails a tool call: exit 2 from PreToolUse would block it. Bad JSON and an unwritable target both exit 0.

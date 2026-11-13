@@ -58,7 +58,8 @@ const input = "(.tool_input as $i | (($i | objects | .command // .file_path // .
 const activitySettings = JSON.stringify({ hooks: {
   PreToolUse: [{ matcher: "*", ...hook(`${call},in:${input}`) }],
   PostToolUse: [{ matcher: "*", ...hook(`${call},ms:.duration_ms`) }],
-  PostToolUseFailure: [{ matcher: "*", ...hook(`${call},ms:.duration_ms`) }],
+  // `err`: the start of the error text, so `sf logs` can say why a call failed.
+  PostToolUseFailure: [{ matcher: "*", ...hook(`${call},ms:.duration_ms,err:((.error // "") | tostring | .[0:120])`) }],
   PermissionDenied: [{ matcher: "*", ...hook(call) }],
   Stop: [hook("")],
 } });

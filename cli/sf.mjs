@@ -292,7 +292,7 @@ function agents() {
 // The block is the call it names when its lines rebuild a command that starts with the hook line's `in`.
 function sandcastleBash(block, e) {
   const ls = block.map((b) => clean(b).trimEnd());
-  if (e?.ev !== "PreToolUse" || e.tool !== "Bash" || !ls.at(-1).endsWith(")") || !one(e.in)) return false;
+  if (!ls.length || e?.ev !== "PreToolUse" || e.tool !== "Bash" || !ls.at(-1).endsWith(")") || !one(e.in)) return false;
   const cmd = [ls[0].slice("◇  Bash(".length), ...ls.slice(1).map((x) => x.slice(3))].join("\n").slice(0, -1);
   return one(cmd).startsWith(one(e.in));
 }
@@ -311,7 +311,9 @@ function followActivity(name) {
     if (!e && s.startsWith("◇  Bash(")) return void block.push(l);
     if (!e) return console.log(clean(l));
     const t = new Date(e.t), at = isNaN(t) ? "--:--:--" : t.toLocaleTimeString();
-    console.log(`${c.d(at)} ${e.ev === "PreToolUse" ? `${c.y("▶")} ${action(e)}` : e.ev === "PostToolUse" ? `${c.g("✓")} ${clean(e.tool).padEnd(6)} ${dur(Number(e.ms))}` : e.ev === "Stop" ? c.b("■ stop") : clean(e.ev)}`);
+    console.log(`${c.d(at)} ${e.ev === "PreToolUse" ? `${c.y("▶")} ${action(e)}` : e.ev === "PostToolUse" ? `${c.g("✓")} ${clean(e.tool).padEnd(6)} ${dur(Number(e.ms))}` : e.ev === "Stop" ? c.b("■ stop")
+      : e.ev === "PostToolUseFailure" ? `${c.r("✗")} ${clean(e.tool).padEnd(6)} failed${e.ms == null ? "" : ` after ${dur(Number(e.ms))}`}${e.err ? `: ${clean(e.err)}` : ""}`
+      : e.ev === "PermissionDenied" ? `${c.r("✗")} ${clean(e.tool).padEnd(6)} denied` : clean(e.ev)}`);
   };
   for (const s of [p.stdout, p.stderr]) readline.createInterface({ input: s }).on("line", show).on("close", flush);
 }
@@ -753,9 +755,13 @@ async function phaseBuild(st) {
         const [kind, num] = onPr ? ["pr", t.pr.number] : ["issue", t.number];
         const last = JSON.parse(gh(kind, "view", String(num), "-R", repo(), "--json", "comments")).comments.filter((x) => x.body.includes("factory:status")).pop();
         console.log(`${c.r(`${t.prRow ? `PR #${num}` : onPr ? `PR #${num} (ticket #${t.number})` : `#${t.number}`} failed`)}: ${t.title}\n  ${(last?.body ?? "").replace(/<!--.*?-->/g, "").trim().slice(0, 300)}`);
+        // The prompt can wait for minutes. A retry that someone else started meanwhile removed agent:blocked,
+        // and a second label would start a second run. So read the labels again before the relabel.
+        const stillBlocked = () => JSON.parse(gh(kind, "view", String(num), "-R", repo(), "--json", "labels")).labels.some((l) => l.name === "agent:blocked")
+          || (console.log(c.d(`${kind === "pr" ? "PR " : ""}#${num} is not blocked now. Someone started it again. No label added.`)), false);
         if (st.mode === "spec" && !onPr && !t.other) {
           // A night-shift ticket: unpark it, then resume the spec. The night shift starts again from the frontier.
-          if ((await ask(`[r]etry: unpark #${t.number} and resume the night shift on spec #${st.spec}, [s]kip`, "rS")) === "r") {
+          if ((await ask(`[r]etry: unpark #${t.number} and resume the night shift on spec #${st.spec}, [s]kip`, "rS")) === "r" && stillBlocked()) {
             if (!t.specRow) act(`unpark #${t.number}`, () => gh("issue", "edit", String(t.number), "-R", repo(), "--remove-label", "agent:blocked"));
             act(`resume spec #${st.spec}`, () => gh("issue", "edit", String(st.spec), "-R", repo(), "--remove-label", "agent:blocked", "--add-label", "agent:implement-spec"));
           } else skip.add(`${t.number}:${t.status}`);
@@ -764,7 +770,7 @@ async function phaseBuild(st) {
         const label = onPr ? (/rebase failed/i.test(last?.body ?? "") ? "agent:rebase" : "agent:review") : /explore run failed/i.test(last?.body ?? "") ? "agent:explore"
           : /prototype run failed/i.test(last?.body ?? "") ? "agent:prototype" : "agent:implement";
         const a = await ask(`[r]etry with ${label}, [s]kip`, "rS");
-        if (a === "r") act(`relabel ${kind} #${num}`, () => gh(kind, "edit", String(num), "-R", repo(), "--remove-label", "agent:blocked", "--add-label", label));
+        if (a === "r" && stillBlocked()) act(`relabel ${kind} #${num}`, () => gh(kind, "edit", String(num), "-R", repo(), "--remove-label", "agent:blocked", "--add-label", label));
         else skip.add(`${t.number}:${t.status}`);
       }
       acted = true;

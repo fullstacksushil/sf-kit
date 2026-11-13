@@ -243,6 +243,7 @@ Polling is up to a minute slower. It makes one API call per trigger label a minu
 - `sf`: Node 22 or later, `gh` signed in, and `claude`.
 - The herdr plugin (optional): herdr 0.9.1 or later, `fzf` and Node.
 - A project that is not plain Node: `setup-wizard.sh` asks for a setup command (`RUN_SETUP`) and a runner image (`RUNNER_IMAGE`). Both are optional, and each factory has its own values. Build the image from `factory-runner:latest` and add the project's tools.
+- One open factory PR per ticket: an implement run does not start when the ticket has an open `agent/issue-<n>-...` PR. It removes `agent:implement` and says so in a comment. Close the PR to build again. `sf` also reads the labels again before a retry, so an old retry prompt does not start a second run.
 
 ## Limits
 

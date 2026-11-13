@@ -119,7 +119,7 @@ endi() { printf '{"sf":1,"t":"2026-11-13T15:25:0%sZ","ev":"%s","id":"%s","tool":
 { prei 1 i1 Read slow.ts; prei 1 i2 Read fast.ts; endi 2 PostToolUse i2 Read 50; endi 3 PostToolUse i1 Read 900; } > "$T/logs/a6"
 { prei 1 h1 Bash hang; prei 2 h2 Bash 'echo b'; endi 3 PostToolUse h2 Bash 30; prei 4 h3 Bash 'echo c'; endi 5 PostToolUse h3 Bash 40; } > "$T/logs/a7"
 { cat "$T/logs/a7"; printf '{"sf":1,"t":"2026-11-13T15:25:06Z","ev":"Stop"}\n'; } > "$T/logs/a8"
-{ prei 1 f1 Bash fails; endi 2 PostToolUseFailure f1 Bash 20; prei 3 f2 Bash rm; printf '{"sf":1,"t":"2026-11-13T15:25:04Z","ev":"PermissionDenied","id":"f2","tool":"Bash"}\n'; } > "$T/logs/a9"
+{ prei 1 f1 Bash fails; printf '{"sf":1,"t":"2026-11-13T15:25:02Z","ev":"PostToolUseFailure","id":"f1","tool":"Bash","ms":20,"err":"Exit code 1\\u001b[31m"}\n'; prei 3 f2 Bash rm; printf '{"sf":1,"t":"2026-11-13T15:25:04Z","ev":"PermissionDenied","id":"f2","tool":"Bash"}\n'; } > "$T/logs/a9"
 # Sandcastle 0.14 log lines from a live agent (qf, 2026-11-13). The hook lines in the L1 format.
 cat > "$T/logs/s1" <<'FIX'
 │
@@ -203,6 +203,10 @@ ok "logs: no activity line, raw lines cleaned" '[ "$(wc -l <<<"$lg")" = 6 ] && g
 lg=$(cd "$T/repo" && "$SF" logs "repo#5" 2>&1 </dev/null)
 lg=$(sed 's/\x1b\[[0-9;]*m//g' <<<"$lg")  # drop sf's own colours
 ok "logs: escapes stripped" 'grep -q "rm -rf /" <<<"$lg" && ! grep -q $'"'"'[\x07\x1b\r]'"'"' <<<"$lg"'
+# A failed call says the tool, the time and the start of the error. A denied call says so. No raw event name.
+lg=$(cd "$T/repo" && "$SF" logs "repo#9" 2>&1 </dev/null | sed 's/\x1b\[[0-9;]*m//g')
+ok "logs: a failed call shows the tool, the time and the error" 'grep -Eq "✗ Bash +failed after 20ms: Exit code 1$" <<<"$lg"'
+ok "logs: a denied call says denied" 'grep -Eq "✗ Bash +denied$" <<<"$lg" && ! grep -q "PostToolUseFailure\|PermissionDenied" <<<"$lg"'
 # L2: a Sandcastle Bash block followed by its hook line shows only the hook line. Everything else stays.
 lg=$(cd "$T/repo" && "$SF" logs "repo#s1" 2>&1 </dev/null | sed 's/\x1b\[[0-9;]*m//g')
 ok "sandcastle: one-line Bash block dropped, hook line kept" '! grep -qF "◇  Bash(cat /tmp/ticket.md" <<<"$lg" && [ "$(grep -cE "▶ Bash +cat /tmp/ticket.md; ls;" <<<"$lg")" = 1 ] && grep -qE "✓ Bash +89ms" <<<"$lg"'
@@ -295,4 +299,28 @@ ok "runs: no factory, one line, no undefined" '[ $rc -eq 0 ] && grep -q "Runs: n
 printf 'GITHUB_REPO=owner/noport\n' > "$T/env/factories/np.env"; git remote set-url origin git@github.com:owner/noport.git
 out=$(cd "$T/repo" && "$SF" 2>&1 </dev/null); rc=$?
 ok "runs: factory file without PORT does not stop the board" '[ $rc -eq 0 ] && grep -q "Runs: Inngest has no app software-factory-np" <<<"$out" && grep -q "Agents" <<<"$out"'
+# The retry prompt can wait for minutes. sf reads the labels again before it adds a label, so a retry that
+# someone else started meanwhile does not start a second run. Own scratch repo: a fake gh with one blocked
+# issue, and a git that skips fetch, so nothing reaches GitHub.
+R="$T/retry"; mkdir -p "$R/bin" "$R/repo/.sandcastle/agent-workflows" "$R/repo/.agents/skills/grill-with-docs"
+cat > "$R/bin/gh" <<'G'
+#!/bin/sh
+echo "gh $*" >> "$R/gh.log"
+case "$*" in
+  "issue list"*"--limit 200 --json number,title,state,body,labels,url"*) echo '[{"number":7,"title":"T7","state":"OPEN","body":"","labels":[{"name":"agent:blocked"}],"url":"u"}]';;
+  "issue view 7"*"--json comments"*) echo '{"comments":[{"body":"Implementer run failed: boom <!-- factory:status -->"}]}';;
+  "issue view 7"*"--json labels"*) cat "$R/labels7";;
+  "issue edit"*) ;;
+  *) echo "[]";;
+esac
+G
+printf '#!/bin/sh\nfor a; do [ "$a" = fetch ] && exit 0; done\nexec %s "$@"\n' "$(command -v git)" > "$R/bin/git"; chmod +x "$R"/bin/*
+(cd "$R/repo" && git init -q && git remote add origin git@github.com:owner/repo.git && git -c user.name=t -c user.email=t@t commit -q --allow-empty -m x \
+  && b=$(git branch --show-current) && git update-ref "refs/remotes/origin/$b" HEAD && git config "branch.$b.remote" origin && git config "branch.$b.merge" "refs/heads/$b")
+# Answers: continue with no factory answering (y), retry (r). Then sf watches, so timeout ends it.
+retry() { : > "$R/gh.log"; (cd "$R/repo" && printf 'y\nr\n' | R="$R" PATH="$R/bin:$PATH" SF_ORCHESTRATOR_URL=http://127.0.0.1:1 SF_FACTORY=repo-a timeout 8 "$SF" 2>&1 | sed 's/\x1b\[[0-9;]*m//g'); }
+echo '{"labels":[{"name":"agent:blocked"}]}' > "$R/labels7"; out=$(retry)
+ok "retry: a ticket that is still blocked gets the label" 'grep -q "issue edit 7 -R owner/repo --remove-label agent:blocked --add-label agent:implement" "$R/gh.log"'
+echo '{"labels":[{"name":"agent:in-progress"}]}' > "$R/labels7"; out=$(retry)
+ok "retry: a ticket that is not blocked now gets no label" '! grep -q "issue edit" "$R/gh.log" && grep -q "#7 is not blocked now" <<<"$out"'
 exit $fail
