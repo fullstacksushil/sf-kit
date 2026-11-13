@@ -278,15 +278,16 @@ function agents() {
     return { name, subject, since, lines };
   });
 }
-/** sf logs: the activity lines of one agent, readable, one per line, as they come. */
+/** sf logs: every log line of one agent as it comes. Activity lines in readable form, other lines cleaned. */
 function followActivity(name) {
-  const p = spawn("docker", ["logs", "-f", "--tail", "200", name], { stdio: ["ignore", "pipe", "ignore"] });
-  readline.createInterface({ input: p.stdout }).on("line", (l) => {
+  const p = spawn("docker", ["logs", "-f", "--tail", "200", name], { stdio: ["ignore", "pipe", "pipe"] });
+  const show = (l) => {
     const e = activityLine(l.trim());
-    if (!e) return;
+    if (!e) return console.log(clean(l));
     const t = new Date(e.t), at = isNaN(t) ? "--:--:--" : t.toLocaleTimeString();
     console.log(`${c.d(at)} ${e.ev === "PreToolUse" ? `${c.y("▶")} ${action(e)}` : e.ev === "PostToolUse" ? `${c.g("✓")} ${clean(e.tool).padEnd(6)} ${dur(Number(e.ms))}` : e.ev === "Stop" ? c.b("■ stop") : clean(e.ev)}`);
-  });
+  };
+  for (const s of [p.stdout, p.stderr]) readline.createInterface({ input: s }).on("line", show);
 }
 
 // The factory that serves this repo: its env file in $ENV_DIR/factories has GITHUB_REPO = origin. Name = file name.

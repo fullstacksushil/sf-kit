@@ -124,7 +124,9 @@ ok "escapes: stripped" '! grep -q $'"'"'\x07'"'"' <<<"$raw" && ! grep -qF $'"'"'
 : > "$T/docker.log"
 lg=$(cd "$T/repo" && "$SF" logs "repo#3" 2>&1 </dev/null)
 ok "logs: follows" 'grep -q "docker logs -f .* a3" "$T/docker.log"'
-ok "logs: activity lines, one per line" '[ "$(wc -l <<<"$lg")" = 2 ] && grep -Eq "Write +notes.md" <<<"$lg" && grep -q "55ms" <<<"$lg" && ! grep -Eq "Fake|Sandcastle" <<<"$lg"'
+ok "logs: mixed log, every line in order" '[ "$(wc -l <<<"$lg")" = 11 ] && grep -Eq "Write +notes.md" <<<"$lg" && grep -q "55ms" <<<"$lg" && grep -qF "Bash(sleep 2)" <<<"$lg" && grep -q "closing line 5" <<<"$lg" && grep -qF "\"tool\":\"Fake\"" <<<"$lg" && [ "$(head -1 <<<"$lg")" = "Sandcastle: starting" ]'
+lg=$(cd "$T/repo" && "$SF" logs "repo#4" 2>&1 </dev/null)
+ok "logs: no activity line, raw lines cleaned" '[ "$(wc -l <<<"$lg")" = 6 ] && grep -q "old 1" <<<"$lg" && grep -q "old 6" <<<"$lg" && ! grep -q $'"'"'[\x07\x1b]'"'"' <<<"$lg"'
 lg=$(cd "$T/repo" && "$SF" logs "repo#5" 2>&1 </dev/null)
 lg=$(sed 's/\x1b\[[0-9;]*m//g' <<<"$lg")  # drop sf's own colours
 ok "logs: escapes stripped" 'grep -q "rm -rf /" <<<"$lg" && ! grep -q $'"'"'[\x07\x1b\r]'"'"' <<<"$lg"'
