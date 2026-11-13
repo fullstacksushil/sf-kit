@@ -2,7 +2,7 @@
 # Make a project factory ready: agent guide files, the course's skills and agent scripts,
 # and (for an existing project) a "state of the repo" report. Never overwrites a file. It adds one
 # package.json script (prepare, to turn on the pre-commit hook) when the project has none.
-# Then follow ../playbooks/01-greenfield.md (new) or ../playbooks/02-brownfield.md (existing).
+# Then run sf in the project. See "The sf pipeline" in README.md.
 set -euo pipefail
 
 KIT="$(cd "$(dirname "$0")" && pwd)"
@@ -254,7 +254,7 @@ cat <<EOF
 1. Install the agent runner deps: npm i -D @ai-hero/sandcastle@^0.14 tsx zod@^3.25
 2. Edit the CHANGEME parts of AGENTS.md and GLOSSARY.md.
 3. Read .sandcastle/agent-workflows/*/prompt.md. They name the course's checks. Point them at yours.
-4. Follow ../playbooks/$( [ "$MODE" = new ] && echo 01-greenfield.md || echo 02-brownfield.md ) from Phase $( [ "$MODE" = new ] && echo 0 || echo "0 (start with docs/agents/state-of-the-repo.md)" ).
+4. $( [ "$MODE" = new ] && echo "Run" || echo "Read docs/agents/state-of-the-repo.md. Then run" ) sf idea "<what you want to build>". See "The sf pipeline" in sf-kit/README.md.
 5. When the project runs in a container, connect it to a host set up with sf-kit/init-host.sh:
    set GITHUB_REPO in /etc/factory/orchestrator.env and add the GitHub webhook.
 EOF

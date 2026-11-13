@@ -3,7 +3,7 @@
 # Installs: Inngest + Postgres + Redis (Docker Compose), optional Phoenix traces, the run network
 # with firewall rules, the runner image, and the orchestrator app as a systemd service.
 # Safe to run again: it never overwrites secrets or existing firewall rules.
-# Design and reasons: ../playbooks/04-infra-build-self-hosted.md, "Option B".
+# Design and reasons: README.md in this folder.
 set -euo pipefail
 
 KIT="$(cd "$(dirname "$0")" && pwd)"

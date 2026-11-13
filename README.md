@@ -80,7 +80,7 @@ flowchart TD
 
 The docs change with the code. Each ticket the agents get ends with its parent spec, so the spec's decisions reach the implementer and the reviewer. The implementer adds a new domain term to `GLOSSARY.md` in its PR. The reviewer adds each judgement rule it wanted to `CODING_STANDARDS.md` on the PR branch. You approve both when you merge.
 
-`sf` also shows open issues from outside its spec that carry a factory label. When no idea is in progress, run `sf` to see only these issues. `ready-for-agent` marks an issue as ready, but it starts no run. `sf` offers each such issue to the factory and adds `agent:explore` when you say yes.
+`sf` also shows open issues from outside its spec that carry a factory label. When no idea is in progress, run `sf` to see only these issues. `ready-for-agent` marks an issue as ready, but it starts no run. `sf` offers each such issue to the factory and adds `agent:explore` when you say yes. Explore runs only on issues a collaborator wrote. It takes the label off any other issue and says why in a comment.
 
 While the factory builds, `sf` shows each ticket's status and the agents' last log lines. It stops when:
 
@@ -160,13 +160,15 @@ flowchart LR
     agent -- "commits and files<br/>(data only)" --> token
 ```
 
-- **No agent holds the token.** Every agent runs in a fresh container with no GitHub token and no access to your LAN.
+- **No agent holds the token.** Every agent runs in a fresh container with no GitHub token and no Linux capabilities (`--cap-drop ALL`). The firewall blocks the private ranges, so agents cannot reach your LAN. It also blocks 100.64.0.0/10, the range Tailscale uses.
 - **Token steps run no project code.** They never run git inside the agent's repo. A push copies the commits into a fresh bare repo and pushes from there, so hooks and config the agent wrote do not run.
 - **Agent files are data.** A token step reads an agent's file only if it is a plain file under `/tmp`. It refuses symlinks.
-- **Workflows stay with people.** The factory refuses to push commits that change `.github/workflows` or `.github/actions`. A pushed workflow runs with the repo's Actions secrets.
+- **Workflows stay with people.** The factory refuses to push commits that change `.github/workflows` or `.github/actions`. A pushed workflow runs with the repo's Actions secrets. The push step checks this against branches it reads from GitHub, not against the agent's repo. One exception: a rebase keeps a PR's own workflow changes when git merges them with no conflict. The factory refuses an agent's fix of a conflict in a workflow file.
 - **The agent cannot approve.** Review posts inline comments as a plain comment review, never as an approval.
-- **The orchestrator checks input.** It checks branch names and issue numbers before they reach a shell. Review and rebase refuse PRs from forks.
-- **Only collaborators steer prototypes.** An `@factory` comment counts only from an owner, member or collaborator.
+- **The orchestrator checks input.** It checks branch names and issue numbers before they reach a shell. Review and rebase refuse PRs from forks. `sf` lists only PRs from the repo's own branches, because it offers to merge them.
+- **Only collaborators give orders.** Agents read only issues that an owner, member or collaborator wrote. This covers tickets, specs, parent specs and explore issues. Any other issue stops the run with a message, and a collaborator must file it again. Review goes on without the spec when the PR closes such an issue. Comments count only from collaborators, and so does an `@factory` comment on a prototype.
+- **Limit a public repo.** On a public repo, also use GitHub's interaction limits, so only collaborators can open issues and PRs. The checks above still hold when a limit ends.
+- **Traces need a key.** With `--observability phoenix`, Phoenix runs with auth on. Without it, any container on the run network can read every run's traces. The Phoenix variable names are not tested here.
 
 ## Webhook or polling
 
@@ -187,6 +189,7 @@ Polling is up to a minute slower. It makes one API call per trigger label a minu
 ## Limits
 
 - Run containers use the public DNS servers 1.1.1.1 and 8.8.8.8, because the run network cannot reach a resolver on your LAN. Set `RUNNER_DNS` in the orchestrator env to use others.
+- Private GitHub dependencies: set `RUN_PRIVATE_DEPS="owner/repo ..."` in the orchestrator env. The token step clones each one, and setup installs from those clones with no token. Not yet tested with the runner image's npm.
 - One factory host serves one repo (`GITHUB_REPO`). Run a second orchestrator for a second repo.
 - The prototype task posts screenshots and a draft PR. It does not deploy a preview you can click. To try it, check out the PR and follow `prototypes/issue-<n>/README.md`.
 - `init-project.sh` adds the `prototype-needed` verdict only to explore files it creates. In an existing copy, add it to the enum in `.sandcastle/agent-workflows/explore/plan-schema.ts` yourself.
