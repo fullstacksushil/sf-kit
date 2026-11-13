@@ -138,3 +138,48 @@ assert.equal(serveOrigin(3001), "http://host.docker.internal:3001");
   delete process.env.OTEL_TRACES_ENDPOINT;
 }
 console.log("multi-factory checks ok");
+
+{ // Every agent container writes the activity hook before the agent runs. A fake docker records the script.
+  const { startAgent } = await import("./src/docker.ts");
+  const { writeFileSync, chmodSync, mkdirSync } = await import("node:fs");
+  const dir = mkdtempSync(`${tmpdir()}/sf-hook-`);
+  writeFileSync(`${dir}/docker`, `#!/bin/sh\nfor a in "$@"; do last="$a"; done\nprintf '%s' "$last" > "${dir}/script"\n`);
+  chmodSync(`${dir}/docker`, 0o755);
+  const path = process.env.PATH;
+  process.env.PATH = `${dir}:${path}`;
+  await startAgent("r1", "echo agent-ran", {}, "issue #1");
+  process.env.PATH = path;
+  const script = readFileSync(`${dir}/script`, "utf8");
+  const home = `${dir}/home`;
+  mkdirSync(home);
+  const run = (h: string) => spawnSync("bash", ["-c", script], { env: { PATH: path!, HOME: h }, encoding: "utf8" });
+  assert.equal(run(home).stdout.trim(), "agent-ran");
+  const hooks = JSON.parse(readFileSync(`${home}/.claude/settings.json`, "utf8")).hooks;
+  // Run each hook command for real. A temp file stands in for the container's stdout.
+  const out = `${dir}/out`;
+  const fire = (ev: string, input: object) => {
+    const cmd: string = hooks[ev][0].hooks[0].command;
+    assert.ok(cmd.endsWith("> /proc/1/fd/1"), cmd);
+    const r = spawnSync("bash", ["-c", cmd.replace("/proc/1/fd/1", out)], { input: JSON.stringify(input), encoding: "utf8" });
+    assert.equal(r.status, 0, r.stderr);
+    const line = readFileSync(out, "utf8");
+    assert.match(line, /^\{"sf":1,"t":"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ",/);
+    assert.ok(line.endsWith("}\n") && line.split("\n").length === 2, line);
+    return line.replace(/"t":"[^"]*"/, '"t":"T"');
+  };
+  const cmdIn = { command: 'echo "a"\nb' + "x".repeat(100) };
+  const base = { session_id: "s", cwd: "/work/repo", tool_use_id: "u" };
+  assert.equal(fire("PreToolUse", { ...base, hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: cmdIn }),
+    `{"sf":1,"t":"T","ev":"PreToolUse","tool":"Bash","in":${JSON.stringify(JSON.stringify(cmdIn).slice(0, 80))}}\n`);
+  assert.equal(fire("PostToolUse", { ...base, hook_event_name: "PostToolUse", tool_name: "Bash", tool_input: cmdIn, tool_response: {}, duration_ms: 2105 }),
+    `{"sf":1,"t":"T","ev":"PostToolUse","tool":"Bash","ms":2105}\n`);
+  assert.equal(fire("Stop", { ...base, hook_event_name: "Stop", last_assistant_message: "done" }), `{"sf":1,"t":"T","ev":"Stop"}\n`);
+  // An existing user settings file stays as it was. The agent still runs.
+  const home2 = `${dir}/home2`;
+  mkdirSync(`${home2}/.claude`, { recursive: true });
+  writeFileSync(`${home2}/.claude/settings.json`, '{"model":"x"}');
+  const r2 = run(home2);
+  assert.match(r2.stdout, /agent-ran/);
+  assert.equal(readFileSync(`${home2}/.claude/settings.json`, "utf8"), '{"model":"x"}');
+}
+console.log("activity hook checks ok");
