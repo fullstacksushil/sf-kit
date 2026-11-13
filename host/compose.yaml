@@ -5,10 +5,7 @@
 services:
   inngest:
     image: inngest/inngest:${INNGEST_VERSION:-latest}   # pin a version in production
-    command: >
-      inngest start
-      --sdk-url http://host.docker.internal:${ORCHESTRATOR_PORT:-3000}/api/inngest
-      --poll-interval 60
+    command: inngest start
     ports:
       - "127.0.0.1:8288:8288"   # API and dashboard: localhost only. Use an SSH tunnel to view.
     environment:
@@ -17,7 +14,7 @@ services:
       INNGEST_POSTGRES_URI: postgres://inngest:${POSTGRES_PASSWORD}@postgres:5432/inngest
       INNGEST_REDIS_URI: redis://redis:6379
     extra_hosts:
-      - "host.docker.internal:host-gateway"   # the orchestrator app runs on the host
+      - "host.docker.internal:host-gateway"   # the factory apps run on the host
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
