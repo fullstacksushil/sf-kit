@@ -25,7 +25,7 @@ flowchart LR
 | `init-project.sh` | Makes a project ready for the factory. It adds the agent guide files, the tracker doc, the skills and the agent scripts. It never overwrites a file. |
 | `orchestrator/` | The Node app. It turns GitHub events into Inngest events. Its functions run the agent tasks in Docker. |
 | `host/` | The compose file, the runner Dockerfile, the Caddyfile and the systemd unit. `init-host.sh` installs them. |
-| `project-template/` | The files `init-project.sh` copies: `AGENTS.md`, `GLOSSARY.md`, `CODING_STANDARDS.md`, the tracker doc, the PR template, the pre-commit hook (`.githooks/pre-commit`, with `scripts/check-file-tokens.mjs`) and a CI workflow (`.github/workflows/check.yml`). `npm install` turns the hook on, in your clone and in each agent's clone. |
+| `project-template/` | The files `init-project.sh` copies: `AGENTS.md`, `GLOSSARY.md`, `CODING_STANDARDS.md`, the tracker doc, the PR template, the pre-commit hook (`.githooks/pre-commit`, with `scripts/check-file-tokens.mjs`) and a CI workflow (`.github/workflows/check.yml`). `npm install` turns the hook on, in your clone and in each agent's clone. The hook runs `npm run check:fast` when the project has it, else `npm run check`. CI runs the full check. Keep `check:fast` to a few seconds, because agents commit often. |
 
 ## Install
 
@@ -188,8 +188,10 @@ Polling is up to a minute slower. It makes one API call per trigger label a minu
 
 ## Limits
 
-- Run containers use the public DNS servers 1.1.1.1 and 8.8.8.8, because the run network cannot reach a resolver on your LAN. Set `RUNNER_DNS` in the orchestrator env to use others.
 - Private GitHub dependencies: set `RUN_PRIVATE_DEPS="owner/repo ..."` in the orchestrator env. The token step clones each one, and setup installs from those clones with no token. Not yet tested with the runner image's npm.
+- The issue gate calls two GitHub APIs that are not tested here: the collaborator permission endpoint and the GraphQL `lastEditedAt` and `editor` fields. If a call fails, the factory refuses the stranger's issue. A collaborator's own issue needs neither call.
+- A rebase stops when a workflow file has a conflict. A person resolves it, because the factory never pushes a workflow that an agent wrote.
+- Explore reads at most 100 labelled issues in one run. The rest keep `agent:explore` and wait for the next run.
 - One factory host serves one repo (`GITHUB_REPO`). Run a second orchestrator for a second repo.
 - The prototype task posts screenshots and a draft PR. It does not deploy a preview you can click. To try it, check out the PR and follow `prototypes/issue-<n>/README.md`.
 - `init-project.sh` adds the `prototype-needed` verdict only to explore files it creates. In an existing copy, add it to the enum in `.sandcastle/agent-workflows/explore/plan-schema.ts` yourself.
