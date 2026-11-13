@@ -98,7 +98,7 @@ export const rebasePr = inngest.createFunction(
         ${how === "conflict" ? `! git diff origin/${pr.base} HEAD | grep -E '^\\+(<<<<<<<|>>>>>>>)( |$)' >/dev/null || { echo "Conflict markers are left in the PR's changes."; exit 1; }` : ""}
       `));
       // The lease: the push lands only if nobody pushed to the PR since this run read it.
-      await step.run("push", () => docker.oneShot(runId, pushScript(pr.branch, { leaseSha: pr.sha }), ghToken()));
+      await step.run("push", () => docker.oneShot(runId, pushScript(pr.branch, { base: pr.base, leaseSha: pr.sha }), ghToken()));
       await step.run("report", () => gh.issues.createComment({ owner, repo, issue_number: n,
         body: `Rebased onto \`${pr.base}\`${how === "conflict" ? ", with conflicts resolved by an agent. Read the new commits" : " by script, no agent"}.${statusTag}` }));
       return { how };

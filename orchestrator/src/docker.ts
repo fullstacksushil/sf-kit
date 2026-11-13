@@ -12,6 +12,7 @@ const LIMITS = [
   "--memory", process.env.RUNNER_MEMORY ?? "8g",
   "--pids-limit", "2048",
   "--security-opt", "no-new-privileges",
+  "--cap-drop", "ALL",
   // Public resolvers: the run network may not reach LAN addresses, and a home router is usually the host's DNS.
   // Container names on factory-net (phoenix) still resolve through Docker's own DNS.
   ...(process.env.RUNNER_DNS ?? "1.1.1.1 8.8.8.8").split(/\s+/).filter(Boolean).flatMap((d) => ["--dns", d]),

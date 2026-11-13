@@ -9,6 +9,12 @@ export const ghToken = () => ({ GH_TOKEN: process.env.FACTORY_PAT! });
 
 // Project setup inside the run container. Override per project in orchestrator.env.
 const SETUP = process.env.RUN_SETUP ?? "npm ci && npm run --if-present db:migrate && npm run --if-present db:seed";
+// Private GitHub repos the project's package.json installs from (for example "acme/shared"), space separated.
+// The token step clones each one to /work/deps. Setup reads them from there, so setup still has no token.
+export const PRIVATE_DEPS = (process.env.RUN_PRIVATE_DEPS ?? "").split(/\s+/).filter(Boolean).map((d) => {
+  if (!/^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/.test(d) || d.includes("..")) throw new Error(`RUN_PRIVATE_DEPS: not owner/repo: ${JSON.stringify(d)}`);
+  return d;
+});
 const MAX_MINUTES = Number(process.env.RUN_MAX_MINUTES ?? 45);
 export const SLOTS = Number(process.env.FACTORY_SLOTS ?? 2);
 
@@ -35,7 +41,9 @@ export function issueNumber(n: unknown): number {
  * `rm -rf repo` makes a retry of this step start clean.
  */
 export const cloneScript = (checkout: string) => `
-  rm -rf repo
+  rm -rf repo deps
+  ${PRIVATE_DEPS.map((d) => `git clone -q --bare "https://x-access-token:$GH_TOKEN@github.com/${d}.git" deps/${d}.git
+  git -C deps/${d}.git remote set-url origin https://github.com/${d}.git`).join("\n  ")}
   git clone -q "https://x-access-token:$GH_TOKEN@github.com/${owner}/${repo}.git" repo
   cd repo
   git remote set-url origin ${remote}
@@ -46,10 +54,21 @@ export const cloneScript = (checkout: string) => `
 `;
 
 /**
+ * Shell lines that stop the step unless a collaborator wrote issue `issue` (a number or a shell variable such as "$issue").
+ * Agents follow what an issue body says, and only its author or a collaborator can edit a body. So on a public repo
+ * a stranger cannot hand the agents orders, also not by editing the body after a collaborator added the label.
+ */
+export const trustedIssueScript = (issue: string) => `
+  case "$(gh api repos/${owner}/${repo}/issues/${issue} --jq .author_association)" in OWNER|MEMBER|COLLABORATOR) ;;
+    *) echo "#${issue} was written by someone outside the repo. The factory does not run on it. A collaborator files it again."; exit 1 ;;
+  esac
+`;
+
+/**
  * The ticket goes to a file with only collaborator comments, the filter the course workflows use.
  * Titles, bodies and comments never pass through the shell.
  */
-export const ticketScript = (n: number, file = "/tmp/ticket.md") => `
+export const ticketScript = (n: number, file = "/tmp/ticket.md") => `${trustedIssueScript(String(issueNumber(n)))}
   gh issue view ${issueNumber(n)} --repo ${owner}/${repo} --json number,title,body,comments \\
     | jq '.comments |= map(select((.authorAssociation | IN("OWNER","MEMBER","COLLABORATOR"))
           and (.body | contains("<!-- factory:status -->") | not)))' \\
@@ -68,6 +87,7 @@ export const ticketScript = (n: number, file = "/tmp/ticket.md") => `
 export const parentSpecScript = (issue: string, file: string) => `
   parent=$(gh api repos/${owner}/${repo}/issues/${issue}/parent --jq .number 2>/dev/null || true)
   case "$parent" in ''|*[!0-9]*) ;; *)
+    ${trustedIssueScript('"$parent"')}
     gh issue view "$parent" --repo ${owner}/${repo} --json number,title,body \\
       --jq '"\\n\\n## Parent spec #" + (.number|tostring) + ": " + .title
             + "\\n\\nThis ticket builds part of this spec. Its decisions bind the ticket.\\n\\n" + .body' >> ${file} ;;
@@ -93,7 +113,7 @@ export function prRefusal(data: PrData): string | null {
 }
 
 /** The spec issue to /tmp/spec.md, read as data. */
-export const specFileScript = (spec: number) => `
+export const specFileScript = (spec: number) => `${trustedIssueScript(String(issueNumber(spec)))}
   gh issue view ${issueNumber(spec)} --repo ${owner}/${repo} --json title,body --jq '"# Spec: " + .title + "\\n\\n" + .body' > /tmp/spec.md
 `;
 
@@ -104,11 +124,15 @@ export function blockersFromBody(body = ""): number[] {
 }
 
 /** Project setup (npm ci, migrations, seed). The code may be agent-written, so this runs with no token. */
-export const setupScript = `cd repo && ${SETUP}`;
+// npm clones a lockfile's git+ssh:// dependency with git, so url.insteadOf redirects it. Tested by hand on 2026-11-13
+// with npm 12.2.1, SSH off and an empty cache. check: not yet tested with the runner image's npm.
+export const setupScript = `${PRIVATE_DEPS.map((d) => ["ssh://git@github.com/", "git@github.com:", "https://github.com/"]
+  .map((from) => `git config --global --add url.file:///work/deps/${d}.git.insteadOf ${from}${d}.git\n`).join("")).join("")}cd repo && ${SETUP}`;
 
 /**
  * No token, inside repo/. Fails when the commits since `from` change GitHub Actions files. A pushed workflow
  * runs with the repo's Actions secrets, so the factory never pushes one. A person makes those changes.
+ * An early message only: the agent can move refs and write /tmp. pushScript enforces the rule.
  */
 export const noWorkflowChanges = (from: string) => `
   test -z "$(git diff --name-only ${from} HEAD -- .github/workflows .github/actions)" \\
@@ -127,14 +151,27 @@ export const checkCommitsScript = `
  * The token step of a push. It never runs git inside the agent's repo: the agent can write repo/.git/config,
  * for example core.fsmonitor, which git runs. So it fetches HEAD into a fresh bare repo outside the volumes
  * and pushes from there.
+ *
+ * It is also where the Actions guard holds. A pushed workflow runs with the repo's Actions secrets, and every
+ * check inside the agent's repo or /tmp reads what the agent can write. Here the guard compares the agent's
+ * HEAD with `base`, fetched from GitHub: the branch the work started from ("HEAD" is the default branch).
+ * Without a lease, the Actions files must match the base the agent started from. With a lease (a rebase), they must
+ * match what git itself makes of that base merged with the branch on GitHub, rebuilt here from refs the agent cannot
+ * write. A clean merge passes. A conflict leaves markers in the rebuilt file, so an agent's resolution is refused.
  */
 /** `leaseSha`: push only if the branch is still at that commit. `force`: replace the branch (factory scratch branches). */
-export const pushScript = (branch: string, { leaseSha, force }: { leaseSha?: string; force?: boolean } = {}) => `
-  git init -q --bare "$HOME/push.git"
-  git -C "$HOME/push.git" fetch -q /work/repo HEAD
+export const pushScript = (branch: string, { base, leaseSha, force }: { base: string; leaseSha?: string; force?: boolean }) => `
+  git init -q --bare "$HOME/push.git" && cd "$HOME/push.git"
+  git fetch -q /work/repo HEAD:refs/agent
   auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
-  git -C "$HOME/push.git" -c core.hooksPath=/dev/null -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" \\
-    push -q ${leaseSha ? `--force-with-lease=refs/heads/${safeRef(branch)}:${sha(leaseSha)} ` : force ? "--force " : ""}${remote} FETCH_HEAD:refs/heads/${safeRef(branch)}
+  gh_git() { git -c core.hooksPath=/dev/null -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" "$@"; }
+  gh_git fetch -q ${remote} ${base === "HEAD" ? "HEAD" : `refs/heads/${safeRef(base)}`}:refs/base
+  want="$(git merge-base refs/base refs/agent)"
+  ${leaseSha ? `gh_git fetch -q ${remote} refs/heads/${safeRef(branch)}:refs/old
+  # Exit 1 means conflicts, and the tree still comes first. An empty tree fails the diff below, so the push stops.
+  want="$(git merge-tree --write-tree "$want" refs/old | head -n1)" || true` : ""}
+  git diff --quiet "$want" refs/agent -- .github/workflows .github/actions || { echo "The agent changed GitHub Actions files. The factory never pushes those. A person makes the change."; exit 1; }
+  gh_git push -q ${leaseSha ? `--force-with-lease=refs/heads/${safeRef(branch)}:${sha(leaseSha)} ` : force ? "--force " : ""}${remote} refs/agent:refs/heads/${safeRef(branch)}
 `;
 const sha = (s: string) => { if (!/^[0-9a-f]{40}$/.test(s)) throw new NonRetriableError(`Not a commit sha: ${s}`); return s; };
 
@@ -154,7 +191,7 @@ export const publishFileScript = (src: string, branch: string, name: string, mes
 `;
 
 /** Check the agent's commits without the token, then push them with it. Returns false when there were none. */
-export async function pushCommits(step: Step, runId: string, branch: string, opts: { force?: boolean } = {}): Promise<boolean> {
+export async function pushCommits(step: Step, runId: string, branch: string, opts: { base: string; force?: boolean }): Promise<boolean> {
   const made = (await step.run("check-commits", () =>
     docker.oneShot(runId, checkCommitsScript).then(() => true, (e: { code?: number }) => {
       if (e.code === 3) return false;

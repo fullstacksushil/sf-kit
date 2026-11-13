@@ -31,7 +31,7 @@ export const implementTicket = inngest.createFunction(
         `implement #${n}`,
       );
 
-      if (!(await pushCommits(step, runId, branch))) throw new Error("The agent made no commits.");
+      if (!(await pushCommits(step, runId, branch, { base: "HEAD" }))) throw new Error("The agent made no commits.");
 
       // In a container so `gh --attach` can upload the agent's /tmp/evidence screenshots. It runs from /,
       // not the agent's repo, so no agent-written git config runs while the token is present.

@@ -51,7 +51,7 @@ export const prototypeIssue = inngest.createFunction(
         `cat > /tmp/prototype-prompt.md <<'SF_PROMPT'\n${prompt(n)}\nSF_PROMPT\n${promptAgent("/tmp/prototype-prompt.md")}`,
         `prototype #${n}`,
       );
-      if (!(await pushCommits(step, runId, branch))) throw new Error("The agent made no commits.");
+      if (!(await pushCommits(step, runId, branch, { base: "HEAD" }))) throw new Error("The agent made no commits.");
 
       // From /, never inside the agent's repo, while the token is present.
       const prUrl = ((await step.run("open-or-update-pr", () => docker.oneShot(runId, `

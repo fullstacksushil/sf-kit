@@ -53,6 +53,10 @@ services:
     image: arizephoenix/phoenix:${PHOENIX_VERSION:-latest}
     environment:
       PHOENIX_WORKING_DIR: /mnt/data
+      # Sign-in on, so the agents' trace key is checked and agents on factory-net cannot read other runs' traces.
+      # check: variable names from Phoenix's authentication docs, not tested here.
+      PHOENIX_ENABLE_AUTH: "true"
+      PHOENIX_SECRET: ${PHOENIX_SECRET:-}  # init-host.sh writes it to inngest.env
     volumes: [phoenix_data:/mnt/data]
     ports:
       - "127.0.0.1:6006:6006"

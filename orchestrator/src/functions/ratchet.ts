@@ -75,7 +75,7 @@ export const lintRatchet = inngest.createFunction(
         await step.run("verify", () => docker.oneShot(runId, `cd repo && if ${stillFails}; then echo "Still failing: $(cat /tmp/ratchet-target.txt)"; exit 1; fi`));
       }
 
-      if (!(await pushCommits(step, runId, branch))) throw new Error("The fix made no commit.");
+      if (!(await pushCommits(step, runId, branch, { base: "HEAD" }))) throw new Error("The fix made no commit.");
       const pr = await step.run("open-pr", async () => {
         const { data } = await gh.pulls.create({
           owner, repo, head: branch, base: (await gh.repos.get({ owner, repo })).data.default_branch, title: title(target),

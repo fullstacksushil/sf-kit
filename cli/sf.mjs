@@ -161,7 +161,9 @@ function tickets(spec, mode = "explore") {
     list = JSON.parse(gh("issue", "list", "-R", repo(), "--state", "all", "--limit", "200", "--search", `"#${spec}" in:body`, "--json", "number,title,state,body,labels,assignees"))
       .filter((i) => i.number !== spec && /##\s*Parent[\s\S]{0,200}#/.test(i.body ?? "") && new RegExp(`#${spec}\\b`).test(i.body ?? ""));
   }
-  const prs = JSON.parse(gh("pr", "list", "-R", repo(), "--state", "open", "--limit", "100", "--json", "number,title,body,isDraft,labels,url"));
+  // Only PRs from this repo's own branches. Anyone can open a fork PR that says "Closes #12", and sf offers to merge PRs.
+  const prs = JSON.parse(gh("pr", "list", "-R", repo(), "--state", "open", "--limit", "100", "--json", "number,title,body,isDraft,labels,url,isCrossRepository"))
+    .filter((p) => !p.isCrossRepository);
   // Issues filed or labelled on GitHub outside this spec, so sf shows all the factory's work in the repo.
   const inSpec = new Set([spec, ...list.map((i) => i.number)]);
   const others = JSON.parse(gh("issue", "list", "-R", repo(), "--state", "open", "--limit", "200", "--json", "number,title,state,body,labels,url"))

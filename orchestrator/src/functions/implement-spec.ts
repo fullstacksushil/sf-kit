@@ -106,7 +106,7 @@ export const specTicket = inngest.createFunction(
         "npx tsx .sandcastle/agent-workflows/implement-spec/build.ts",
         `spec #${spec} ticket #${ticket}`);
       // A scratch branch the factory owns, so a retry may replace it.
-      if (!(await pushCommits(step, runId, branch, { force: true }))) throw new Error("The agent made no commits.");
+      if (!(await pushCommits(step, runId, branch, { base: `spec/${spec}`, force: true }))) throw new Error("The agent made no commits.");
       return { branch };
     } catch (err) {
       await step.run("report-failure", async () => {
@@ -233,7 +233,7 @@ export const implementSpec = inngest.createFunction(
             return "parked";
           }));
           if (verified === "parked") continue;
-          await step.run(`${key}:push`, () => docker.oneShot(runId, pushScript(integration), ghToken()));
+          await step.run(`${key}:push`, () => docker.oneShot(runId, pushScript(integration, { base: integration }), ghToken()));
           await step.run(`${key}:close`, async () => {
             await gh.issues.createComment({ owner, repo, issue_number: t.number, body: `Built and merged into \`${integration}\`. The review happens on the spec's PR.${statusTag}` });
             await gh.issues.update({ owner, repo, issue_number: t.number, state: "closed", state_reason: "completed" });

@@ -55,16 +55,20 @@ id -nG "$ME" | grep -qw docker || echo "Warning: $ME is not in the docker group.
 say "Secrets in $ETC"
 run sudo mkdir -p "$ETC" "$OPT"
 run sudo chown "$ME" "$OPT"
-SIGNING_KEY="$(openssl rand -hex 32)" EVENT_KEY="$(openssl rand -hex 16)"
+SIGNING_KEY="$(openssl rand -hex 32)" EVENT_KEY="$(openssl rand -hex 16)" PHOENIX_SECRET="$(openssl rand -hex 32)"
 if [ "$DRY" = 0 ] && sudo test -e "$ETC/inngest.env"; then
   # Reuse the keys already on disk, so both files agree.
   SIGNING_KEY="$(sudo sed -n 's/^INNGEST_SIGNING_KEY=//p' "$ETC/inngest.env")"
   EVENT_KEY="$(sudo sed -n 's/^INNGEST_EVENT_KEY=//p' "$ETC/inngest.env")"
+  # write_secret keeps this file. A file from before Phoenix auth gets the secret added once.
+  # Never replace it: a new secret voids every Phoenix API key.
+  sudo grep -q '^PHOENIX_SECRET=.' "$ETC/inngest.env" || echo "PHOENIX_SECRET=$PHOENIX_SECRET" | sudo tee -a "$ETC/inngest.env" >/dev/null
 fi
 write_secret "$ETC/inngest.env" <<EOF
 INNGEST_SIGNING_KEY=$SIGNING_KEY
 INNGEST_EVENT_KEY=$EVENT_KEY
 POSTGRES_PASSWORD=$(openssl rand -hex 16)
+PHOENIX_SECRET=$PHOENIX_SECRET
 EOF
 OTEL_LINE="# OTEL_TRACES_ENDPOINT=http://phoenix:6006/v1/traces"
 [ "$OBS" = phoenix ] && OTEL_LINE="OTEL_TRACES_ENDPOINT=http://phoenix:6006/v1/traces"
@@ -90,6 +94,9 @@ CLAUDE_CODE_OAUTH_TOKEN=
 FACTORY_SLOTS=2
 RUN_MAX_MINUTES=45
 RUN_SETUP="npm ci && npm run --if-present db:migrate && npm run --if-present db:seed"
+# Private GitHub repos that package.json installs from, as owner/repo, space separated. FACTORY_PAT needs
+# Contents: read on each. Setup installs them from local copies and never sees the token.
+RUN_PRIVATE_DEPS=
 
 # Agent traces over OTLP/HTTP. Phoenix: as below. Self-hosted Langfuse:
 #   OTEL_TRACES_ENDPOINT=http://<langfuse-host>:3000/api/public/otel/v1/traces
@@ -103,7 +110,8 @@ if [ "$DRY" = 1 ] || ! docker network inspect factory-net >/dev/null 2>&1; then
 fi
 # Run containers may reach the internet, each other and Phoenix. Not private networks, not this host.
 rule() { if [ "$DRY" = 1 ] || ! sudo iptables -C "$@" 2>/dev/null; then run sudo iptables -I "$@"; fi; }
-for cidr in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16; do
+# 100.64.0.0/10 is carrier-grade NAT, also the range Tailscale gives its machines.
+for cidr in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16 100.64.0.0/10; do
   rule DOCKER-USER -s "$SUBNET" -d "$cidr" -j DROP
 done
 rule DOCKER-USER -s "$SUBNET" -d "$SUBNET" -j ACCEPT

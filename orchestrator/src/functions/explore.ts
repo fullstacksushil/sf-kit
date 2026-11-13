@@ -15,14 +15,34 @@ const NEXT_LABEL: Record<string, string> = {
 };
 
 // Titles, bodies and collaborator comments go into a file. They never pass through the shell.
-const listScript = `
+// Only the issues in `trusted`: refuseStrangers already took the others out.
+const listScript = (trusted: number[]) => `
   mkdir -p /tmp/explore
   gh issue list --repo ${owner}/${repo} --state open --label agent:explore --limit 100 \\
     --json number,title,body,createdAt,comments \\
-    | jq 'map(.comments |= map(select((.authorAssociation | IN("OWNER","MEMBER","COLLABORATOR"))
+    | jq --argjson trusted '${JSON.stringify(trusted.map(Number))}' 'map(select(.number | IN($trusted[])))
+        | map(.comments |= map(select((.authorAssociation | IN("OWNER","MEMBER","COLLABORATOR"))
           and (.body | contains("<!-- factory:status -->") | not))))' > /tmp/explore/issues.json
   jq -c '[.[].number] | sort' /tmp/explore/issues.json
 `;
+
+/**
+ * The rule of trustedIssueScript: agents read only issues a collaborator wrote. A stranger's issue loses
+ * agent:explore and gets one comment, so it does not wait forever and the poll does not start empty runs.
+ * Returns the collaborators' issues.
+ */
+async function refuseStrangers(): Promise<number[]> {
+  const issues = (await gh.paginate(gh.issues.listForRepo, { owner, repo, state: "open", labels: "agent:explore", per_page: 100 }))
+    .filter((i) => !i.pull_request);
+  const trusted: number[] = [];
+  for (const i of issues) {
+    if (["OWNER", "MEMBER", "COLLABORATOR"].includes(i.author_association ?? "")) { trusted.push(i.number); continue; }
+    await gh.issues.removeLabel({ owner, repo, issue_number: i.number, name: "agent:explore" }).catch(() => {});
+    await gh.issues.createComment({ owner, repo, issue_number: i.number,
+      body: `Someone outside the repo wrote this issue, so the factory does not explore it. A collaborator can file it again.${statusTag}` });
+  }
+  return trusted;
+}
 const hasLabel = (labels: (string | { name?: string })[], name: string) => labels.some((l) => (typeof l === "string" ? l : l.name) === name);
 
 /** The apply job's checks from the course workflow. An empty list means the plan is safe to apply. */
@@ -54,7 +74,9 @@ export const exploreBatch = inngest.createFunction(
     let batch: number[] = [];
     const applied = new Set<number>(); // issues apply has handed on. Steps replay on resume, so this is rebuilt each time.
     try {
-      batch = JSON.parse((await step.run("list-batch", () => docker.oneShot(runId, listScript, ghToken()))) as string) as number[];
+      const trusted = await step.run("refuse-strangers", refuseStrangers);
+      if (trusted.length === 0) return { batch };
+      batch = JSON.parse((await step.run("list-batch", () => docker.oneShot(runId, listScript(trusted), ghToken()))) as string) as number[];
       if (batch.length === 0) return { batch };
       // agent:explore off, agent:in-progress on, so a second run sees a disjoint batch. A failure here is
       // reported below: every issue already claimed gets agent:blocked and a comment.

@@ -9,8 +9,19 @@ assert.equal(safeRef("agent/issue-12-abc"), "agent/issue-12-abc");
 for (const bad of ["x$(curl evil)", "a;b", "-x", "a..b", "a b"]) assert.throws(() => safeRef(bad), undefined, bad);
 assert.equal(issueNumber(12), 12);
 for (const bad of [0, -1, 1.5, "12", "1; rm -rf /", null]) assert.throws(() => issueNumber(bad), undefined, String(bad));
-assert.throws(() => pushScript("main;id"));
-assert.ok(!/cd repo/.test(pushScript("agent/x")), "the token push must not run git inside the agent's repo");
+assert.throws(() => pushScript("main;id", { base: "HEAD" }));
+assert.throws(() => pushScript("agent/x", { base: "main;id" }));
+assert.ok(!/cd repo/.test(pushScript("agent/x", { base: "HEAD" })), "the token push must not run git inside the agent's repo");
+{ // Private deps: the token clone strips the token, and setup redirects to the local copy.
+  process.env.RUN_PRIVATE_DEPS = "acme/shared";
+  const r = await import("./src/run.ts?deps");
+  assert.match(r.cloneScript(""), /remote set-url origin https:\/\/github.com\/acme\/shared.git/);
+  assert.match(r.setupScript, /url.file:\/\/\/work\/deps\/acme\/shared.git.insteadOf ssh:\/\/git@github.com\/acme\/shared.git/);
+  assert.ok(!/GH_TOKEN/.test(r.setupScript), "setup must not see the token");
+  process.env.RUN_PRIVATE_DEPS = "acme/x;id";
+  await assert.rejects(import("./src/run.ts?bad"));
+  delete process.env.RUN_PRIVATE_DEPS;
+}
 console.log("checks ok");
 
 // The new tasks' pure logic.
@@ -31,7 +42,7 @@ assert.equal(eventForLabel("agent:rebase", 5, false), null, "a PR label on an is
 assert.ok(isPrototypeMention({ body: "@factory make it blue", author_association: "OWNER" }));
 assert.ok(!isPrototypeMention({ body: "@factory make it blue", author_association: "NONE" }), "strangers cannot trigger runs");
 assert.ok(!isPrototypeMention({ body: "Reply with @factory <!-- factory:prototype -->", author_association: "OWNER" }), "the factory's own comment");
-assert.match(pushScript("spec/3-t4", { force: true }), /push -q --force /);
-assert.match(pushScript("agent/x", { leaseSha: "a".repeat(40) }), /--force-with-lease=refs\/heads\/agent\/x:a{40} /);
-assert.throws(() => pushScript("agent/x", { leaseSha: "nope" }));
+assert.match(pushScript("spec/3-t4", { base: "spec/3", force: true }), /push -q --force /);
+assert.match(pushScript("agent/x", { base: "main", leaseSha: "a".repeat(40) }), /--force-with-lease=refs\/heads\/agent\/x:a{40} /);
+assert.throws(() => pushScript("agent/x", { base: "main", leaseSha: "nope" }));
 console.log("new task checks ok");

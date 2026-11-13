@@ -1,13 +1,16 @@
 import { NonRetriableError } from "inngest";
 import { inngest } from "../inngest.ts";
 import * as docker from "../docker.ts";
-import { agentFiles, cloneScript, gh, ghToken, issueNumber, owner, parentSpecScript, pushCommits, repo, prRefusal, resetOnFailure, runAgent, safeRef, statusTag } from "../run.ts";
+import { agentFiles, trustedIssueScript, cloneScript, gh, ghToken, issueNumber, owner, parentSpecScript, pushCommits, repo, prRefusal, resetOnFailure, runAgent, safeRef, statusTag } from "../run.ts";
 
 // The spec is whatever issue the PR body says it closes, the same rule as the course's review workflow.
 const specScript = (pr: number) => `
   gh pr view ${pr} --repo ${owner}/${repo} --json body --jq .body > /tmp/pr-body.md
   issue=$(grep -oiE '(closes|fixes|resolves) #[0-9]+' /tmp/pr-body.md | head -n1 | grep -oE '[0-9]+' || true)
-  if [ -n "$issue" ]; then
+  # A collaborator's PR may fix a stranger's bug report. Then the review goes on without that text.
+  if [ -n "$issue" ] && ! ( ${trustedIssueScript('"$issue"')} ) >/dev/null; then
+    echo "No spec available: #$issue was written by someone outside the repo, so the factory does not read it." > /tmp/review-spec.md
+  elif [ -n "$issue" ]; then
     gh issue view "$issue" --repo ${owner}/${repo} --json number,title,body \\
       --jq '"# Ticket #" + (.number|tostring) + ": " + .title + "\\n\\n" + .body' > /tmp/review-spec.md
     ${parentSpecScript('"$issue"', "/tmp/review-spec.md")}
@@ -52,7 +55,7 @@ export const reviewPr = inngest.createFunction(
       );
 
       // The reviewer may commit fixes. pushCommits pushes them, or does nothing when there are none.
-      await pushCommits(step, runId, pr.branch);
+      await pushCommits(step, runId, pr.branch, { base: pr.branch });
 
       // Each post is its own step, so a retry never posts a comment twice.
       // Read without the token first: a missing verdict, or a fallback note without the course's

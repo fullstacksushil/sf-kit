@@ -282,7 +282,8 @@ if [[ "$current" == *phoenix* ]]; then
   fi
   if [[ -n "$PHOENIX_API_KEY" ]]; then
     # An empty POST: 401 means the key is wrong. Any other answer means Phoenix took the key.
-    code=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $PHOENIX_API_KEY" http://127.0.0.1:6006/v1/traces || true)
+    # The key goes to curl on stdin (-K -), not in its arguments, which every local user can read in ps.
+    code=$(printf 'header = "Authorization: Bearer %s"\n' "$PHOENIX_API_KEY" | curl -s -K - -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:6006/v1/traces || true)
     if [[ "$code" == 401 || "$code" == 000 ]]; then
       warn "Phoenix did not accept the key (HTTP $code). Run this stage again."; SKIPPED+=("Phoenix API key failed the test")
     else
@@ -301,7 +302,7 @@ elif confirm "Send agent traces to a self-hosted Langfuse?"; then
   ask LANGFUSE_PUBLIC_KEY "Public key (pk-lf-...):"
   ask_secret LANGFUSE_SECRET_KEY "Secret key (sk-lf-...):"
   # check: GET /api/public/projects returns the key's project (Langfuse public API).
-  code=$(curl -s -o /dev/null -w '%{http_code}' -u "$LANGFUSE_PUBLIC_KEY:$LANGFUSE_SECRET_KEY" "$LANGFUSE_URL/api/public/projects" || true)
+  code=$(printf 'user = "%s:%s"\n' "$LANGFUSE_PUBLIC_KEY" "$LANGFUSE_SECRET_KEY" | curl -s -K - -o /dev/null -w '%{http_code}' "$LANGFUSE_URL/api/public/projects" || true)
   [[ "$code" == 200 ]] && say "${GREEN}✓${RESET} Langfuse accepted the keys" || { warn "Langfuse answered $code, not 200."; SKIPPED+=("Langfuse keys not verified ($code)"); }
   write_env OTEL_TRACES_ENDPOINT "$LANGFUSE_URL/api/public/otel/v1/traces"
   write_env OTEL_TRACES_HEADERS "Authorization=Basic $(printf '%s:%s' "$LANGFUSE_PUBLIC_KEY" "$LANGFUSE_SECRET_KEY" | base64 -w0),x-langfuse-ingestion-version=4"
