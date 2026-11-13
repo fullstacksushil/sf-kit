@@ -9,13 +9,13 @@
 //   sf build "<...>"                     the same as sf idea
 //   sf                                   resume from where the last step stopped
 //   sf status | sf watch                 the tickets and the agents, once or live
-//   sf logs <text>                       follow the log of the agent whose subject contains <text>
+//   sf logs <text>                       follow the actions of the agent whose subject contains <text>
 //   sf retro | sf architecture | sf ratchet | sf rebase
 //
 // Run it in the project's root. State lives on GitHub (issues, labels, PRs). .sf/state.json keeps only
 // this machine's Claude session id and the spec and map numbers. Each planning step is an interactive
 // Claude session: you talk, then type /exit to come back to sf. Factory steps are labels the orchestrator reacts to.
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import readline from "node:readline";
@@ -240,15 +240,54 @@ const statusCell = (s) => STATUS[s][1](STATUS[s][0].padEnd(20));
 const GATES = new Set(["pr-ready", "needs-you", "failed", "prototype-ready"]);
 
 // ── agents: docker containers labelled by the orchestrator ───────────────
+// Agent text is untrusted: drop escape sequences, control and bidi characters before it reaches the terminal.
+const clean = (s) => String(s ?? "").replace(/\x1b(\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(\x07|\x1b\\)?)/g, "").replace(/[\x00-\x1f\x7f-\x9f‎‏‪-‮⁦-⁩]/g, " ");
+// An activity line, written by the agent container's hook: {"sf":1,"t":...,"ev":...}. Other JSON is not one.
+const activityLine = (l) => { if (!l.startsWith('{"sf":1,')) return null; try { return JSON.parse(l); } catch { return null; } };
+const dur = (ms) => (!Number.isFinite(ms) ? "?" : ms < 1000 ? `${Math.round(ms)}ms` : ms < 60_000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.floor(ms / 60_000)}m${String(Math.floor(ms / 1000) % 60).padStart(2, "0")}s`);
+const action = (e) => `${clean(e.tool).padEnd(6)} ${clean(e.in).trim()}`;
+/** Current action (the last PreToolUse with no later PostToolUse of that tool), the last 3 finished ones, and Stop. */
+function activity(events) {
+  const open = [], done = [];
+  let stop = false;
+  for (const e of events) {
+    stop = e.ev === "Stop";
+    if (e.ev === "PreToolUse") open.push(e);
+    if (e.ev !== "PostToolUse") continue;
+    const i = open.findIndex((o) => o.tool === e.tool); // the hook line carries no call id: pair the oldest open call of the tool
+    if (i >= 0) done.push({ ...open.splice(i, 1)[0], ms: Number(e.ms) });
+  }
+  return { now: stop ? null : open.at(-1), done: done.slice(-3).reverse(), stop };
+}
 function agents() {
   const out = tryShell("docker", ["ps", "--filter", `label=factory.repo=${repo().toLowerCase()}`, "--format", '{{.Names}}\t{{.Label "factory.subject"}}\t{{.RunningFor}}']);
   if (out === null) return null; // no docker access here: the factory runs elsewhere
   return out.trim().split("\n").filter(Boolean).map((l) => {
     const [name, subject, since] = l.split("\t");
-    const r = spawnSync("docker", ["logs", "--tail", "4", name], { encoding: "utf8" });
-    const lines = `${r.stdout ?? ""}${r.stderr ?? ""}`.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "").split("\n").map((s) => s.trim()).filter(Boolean).slice(-4);
+    // shortcut: 200 lines bound the read. A run with more Sandcastle noise than that shows fewer finished actions.
+    const r = spawnSync("docker", ["logs", "--tail", "200", name], { encoding: "utf8" });
+    const raw = `${r.stdout ?? ""}${r.stderr ?? ""}`.split("\n").map((s) => s.trim()).filter(Boolean);
+    const events = raw.map(activityLine).filter(Boolean);
+    if (!events.length) return { name, subject, since, lines: raw.slice(-4).map((s) => clean(s).trim()) }; // an old container: no hook
+    const { now, done, stop } = activity(events);
+    const lines = [
+      ...(stop ? ["finishing: the agent stopped"] : []),
+      ...(now ? [`now  ${action(now)} · ${dur(Date.now() - Date.parse(now.t))}`] : []),
+      ...done.map((d) => `done ${action(d)} · ${dur(d.ms)}`),
+    ];
     return { name, subject, since, lines };
   });
+}
+/** sf logs: every log line of one agent as it comes. Activity lines in readable form, other lines cleaned. */
+function followActivity(name) {
+  const p = spawn("docker", ["logs", "-f", "--tail", "200", name], { stdio: ["ignore", "pipe", "pipe"] });
+  const show = (l) => {
+    const e = activityLine(l.trim());
+    if (!e) return console.log(clean(l));
+    const t = new Date(e.t), at = isNaN(t) ? "--:--:--" : t.toLocaleTimeString();
+    console.log(`${c.d(at)} ${e.ev === "PreToolUse" ? `${c.y("▶")} ${action(e)}` : e.ev === "PostToolUse" ? `${c.g("✓")} ${clean(e.tool).padEnd(6)} ${dur(Number(e.ms))}` : e.ev === "Stop" ? c.b("■ stop") : clean(e.ev)}`);
+  };
+  for (const s of [p.stdout, p.stderr]) readline.createInterface({ input: s }).on("line", show);
 }
 
 // The factory that serves this repo: its env file in $ENV_DIR/factories has GITHUB_REPO = origin. Name = file name.
@@ -736,7 +775,7 @@ switch (cmd) {
   case "logs": {
     const ags = agents() ?? die("No docker access on this machine.");
     const a = ags.find((x) => x.subject.includes(rest.join(" "))) ?? die(`No running agent matches "${rest.join(" ")}". Running: ${ags.map((x) => x.subject).join(", ") || "none"}`);
-    spawnSync("docker", ["logs", "-f", "--tail", "50", a.name], { stdio: "inherit" }); break;
+    followActivity(a.name); break;
   }
   case "retro": retro(); break;
   case "architecture": await architecture(); break;
