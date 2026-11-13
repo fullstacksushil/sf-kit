@@ -241,7 +241,7 @@ const GATES = new Set(["pr-ready", "needs-you", "failed", "prototype-ready"]);
 
 // ── agents: docker containers labelled by the orchestrator ───────────────
 function agents() {
-  const out = tryShell("docker", ["ps", "--filter", `label=factory.repo=${repo()}`, "--format", '{{.Names}}\t{{.Label "factory.subject"}}\t{{.RunningFor}}']);
+  const out = tryShell("docker", ["ps", "--filter", `label=factory.repo=${repo().toLowerCase()}`, "--format", '{{.Names}}\t{{.Label "factory.subject"}}\t{{.RunningFor}}']);
   if (out === null) return null; // no docker access here: the factory runs elsewhere
   return out.trim().split("\n").filter(Boolean).map((l) => {
     const [name, subject, since] = l.split("\t");

@@ -42,6 +42,10 @@ ok "rebase event name" 'grep -q "factory/repo-a/rebase.sweep" "$T/events.log"'
 # agent list filters on factory.repo
 "$SF" logs zzz >/dev/null 2>&1 </dev/null
 ok "docker ps filters on factory.repo" 'grep -q "label=factory.repo=owner/repo" "$T/docker.log"'
+git remote set-url origin git@github.com:Owner/Repo.git; : > "$T/docker.log"
+"$SF" logs zzz >/dev/null 2>&1 </dev/null
+ok "docker ps filter lowercases the origin" 'grep -q "label=factory.repo=owner/repo" "$T/docker.log"'
+git remote set-url origin git@github.com:owner/repo.git
 
 # override
 : > "$T/events.log"

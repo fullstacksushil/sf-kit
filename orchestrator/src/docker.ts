@@ -41,6 +41,9 @@ export async function oneShot(runId: string, script: string, vars: Record<string
   }
 }
 
+/** sf filters on this label. GitHub ignores case in repo names, so the value is lowercase. */
+export const repoLabel = () => `factory.repo=${(process.env.GITHUB_REPO ?? "").toLowerCase()}`;
+
 /** Start the agent in the background and return at once. */
 // One run can start several agents (implement-spec: decompose, notes, merges). `agent` names the container,
 // `runId` names the volumes they share.
@@ -48,7 +51,7 @@ export async function startAgent(runId: string, script: string, vars: Record<str
   // The labels let `sf` show which ticket or PR each running agent of its repo works on.
   await exec(
     "docker",
-    ["run", "-d", "--name", `agent-${agent}`, "--label", `factory.subject=${subject}`, "--label", `factory.repo=${process.env.GITHUB_REPO}`, ...LIMITS, ...envFlags(vars), ...volumes(runId), "-w", "/work/repo", IMAGE, "bash", "-c", script],
+    ["run", "-d", "--name", `agent-${agent}`, "--label", `factory.subject=${subject}`, "--label", repoLabel(), ...LIMITS, ...envFlags(vars), ...volumes(runId), "-w", "/work/repo", IMAGE, "bash", "-c", script],
     { env: { ...process.env, ...vars } },
   );
 }

@@ -14,7 +14,7 @@ fake gh '[[ "$*" == *permissions* ]] && { [[ "${GH_TOKEN:-}" == good* ]] && echo
 fake systemctl '[[ "$1" == is-active ]] && exit 1; exit 0'
 fake curl 'echo 200'
 fake claude 'echo ok'
-for c in sudo ufw docker xdg-open open wslview explorer.exe mise; do fake "$c"; done
+for c in sudo ufw docker npm xdg-open open wslview explorer.exe mise; do fake "$c"; done
 
 fails=0
 ok()  { printf 'ok   %s\n' "$1"; }
@@ -96,7 +96,13 @@ wiz $'\n\nn\nn\nn\ngood-z\n\nn\nn\ny' --repo acme/zed --factory zz
 check "--factory with a free name exits 0" test "$rc" = 0
 check "--factory skips the name question" bash -c "! grep -q 'Factory name:' '$OUT'"
 check "--factory names the env file" test "$(val GITHUB_REPO "$F/zz.env")" = acme/zed
-check "--factory with a bad name stops" bash -c "printf '\\n' | env PATH='$T/bin:$PATH' ENV_DIR='$E' bash '$KIT/setup-wizard.sh' --repo acme/q --factory Bad_Name >/dev/null 2>&1; [ \$? != 0 ] && [ ! -e '$F/Bad_Name.env' ]"
+check "--factory with a bad name stops" bash -c "printf '\\n' | env PATH='$T/bin:$PATH' ENV_DIR='$E' ORCH_DIR='$KIT/orchestrator' bash '$KIT/setup-wizard.sh' --repo acme/q --factory Bad_Name >/dev/null 2>&1; [ \$? != 0 ] && [ ! -e '$F/Bad_Name.env' ]"
+
+# 7. The wizard's name rule is the orchestrator's.
+rule_sh=$(sed -n "s/^NAME_RULE='\(.*\)'.*/\1/p" "$KIT/setup-wizard.sh")
+rule_ts=$(sed -n 's|^const FACTORY_NAME_RULE = /\(.*\)/;$|\1|p' "$KIT/orchestrator/src/inngest.ts")
+check "NAME_RULE equals FACTORY_NAME_RULE in inngest.ts" test -n "$rule_sh" -a "$rule_sh" = "$rule_ts"
+check "NAME_RULE comment names inngest.ts" bash -c "grep -q '^NAME_RULE=.*orchestrator/src/inngest.ts' '$KIT/setup-wizard.sh'"
 
 (( fails )) && { echo "$fails failed"; exit 1; }
 echo "all passed"

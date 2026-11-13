@@ -262,5 +262,5 @@ cat <<EOF
 3. Read .sandcastle/agent-workflows/*/prompt.md. They name the course's checks. Point them at yours.
 4. $( [ "$MODE" = new ] && echo "Run" || echo "Read docs/agents/state-of-the-repo.md. Then run" ) sf idea "<what you want to build>". See "The sf pipeline" in sf-kit/README.md.
 5. When the project runs in a container, connect it to a host set up with sf-kit/init-host.sh:
-   set GITHUB_REPO in /etc/factory/orchestrator.env and add the GitHub webhook.
+   add its factory with $KIT/setup-wizard.sh --repo <owner>/<name>. The wizard also adds the GitHub webhook.
 EOF
