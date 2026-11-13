@@ -45,6 +45,25 @@ export async function oneShot(runId: string, script: string, vars: Record<string
 /** sf filters on this label. GitHub ignores case in repo names, so the value is lowercase. */
 export const repoLabel = () => `factory.repo=${(process.env.GITHUB_REPO ?? "").toLowerCase()}`;
 
+// The activity line `sf` reads: one JSON object per hook event on the container's stdout. "sf":1 comes first.
+// Hook stderr stays inside Claude Code, so the hook writes to process 1's stdout, which is the `docker logs` stream.
+// check: tested with the image's jq and no --init (process 1 is the start script). Not tested with the OTel variables set.
+const hook = (fields: string) => ({ hooks: [{ type: "command", command: `jq -c '{sf:1,t:(now|todate),ev:.hook_event_name${fields}}' > /proc/1/fd/1` }] });
+const activitySettings = JSON.stringify({ hooks: {
+  PreToolUse: [{ matcher: "*", ...hook(",tool:.tool_name,in:(.tool_input|tostring|.[0:80])") }],
+  PostToolUse: [{ matcher: "*", ...hook(",tool:.tool_name,ms:.duration_ms") }],
+  Stop: [hook("")],
+} });
+// The user settings file covers plain `claude -p` and Sandcastle's agent alike. The image ships $HOME/.claude
+// without a settings.json and no start script writes one. If one is there, it stays and the agent runs without the hook.
+// check: a --settings file next to this user file was not tested. The hook can fire two times.
+const activityHook = `if [ -e "$HOME/.claude/settings.json" ]; then echo "sf: $HOME/.claude/settings.json exists, no activity hook"
+else mkdir -p "$HOME/.claude" && cat > "$HOME/.claude/settings.json" <<'SF_HOOKS'
+${activitySettings}
+SF_HOOKS
+fi
+`;
+
 /** Start the agent in the background and return at once. */
 // One run can start several agents (implement-spec: decompose, notes, merges). `agent` names the container,
 // `runId` names the volumes they share.
@@ -52,7 +71,7 @@ export async function startAgent(runId: string, script: string, vars: Record<str
   // The labels let `sf` show which ticket or PR each running agent of its repo works on.
   await exec(
     "docker",
-    ["run", "-d", "--name", `agent-${agent}`, "--label", `factory.subject=${subject}`, "--label", repoLabel(), ...LIMITS, ...envFlags(vars), ...volumes(runId), "-w", "/work/repo", IMAGE, "bash", "-c", script],
+    ["run", "-d", "--name", `agent-${agent}`, "--label", `factory.subject=${subject}`, "--label", repoLabel(), ...LIMITS, ...envFlags(vars), ...volumes(runId), "-w", "/work/repo", IMAGE, "bash", "-c", activityHook + script],
     { env: { ...process.env, ...vars } },
   );
 }
