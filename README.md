@@ -20,11 +20,11 @@ flowchart LR
 | Path | What it does |
 | --- | --- |
 | `sf` (`cli/sf.mjs`) | The pipeline CLI. It takes an idea from planning to merged pull requests. It shows each running agent's last log lines. |
-| `init-host.sh` | Prepares a VPS or laptop. It installs Inngest, Postgres, Redis, optional Phoenix, the run network, firewall rules, the runner image and the orchestrator service. It never overwrites secrets. |
-| `setup-wizard.sh` | Run it after `init-host.sh`. It asks for the tokens, optional Langfuse keys, the firewall rule, the service start, and webhook or polling. It checks each value. |
+| `init-host.sh` | Prepares a VPS or laptop once. It installs Inngest, Postgres, Redis, optional Phoenix, the run network, firewall rules, the runner image and the template unit for the factories. It writes the shared env file and starts no factory. It never overwrites secrets. |
+| `setup-wizard.sh` | Run it after `init-host.sh`, once for each repo. Each run adds or edits one factory. It asks for the repo, the factory name, the GitHub token, the port, the firewall rule, the start, and webhook or polling. The first run also asks for the Claude token and optional Langfuse keys. It checks each value. |
 | `init-project.sh` | Makes a project ready for the factory. It adds the agent guide files, the tracker doc, the skills and the agent scripts. It never overwrites a file. |
 | `orchestrator/` | The Node app. It turns GitHub events into Inngest events. Its functions run the agent tasks in Docker. |
-| `host/` | The compose file, the runner Dockerfile, the Caddyfile and the systemd unit. `init-host.sh` installs them. |
+| `host/` | The compose file, the runner Dockerfile, the Caddyfile and the systemd template unit `factory-orchestrator@.service`. `init-host.sh` installs them. |
 | `project-template/` | The files `init-project.sh` copies: `AGENTS.md`, `GLOSSARY.md`, `CODING_STANDARDS.md`, the tracker doc, the PR template, the pre-commit hook (`.githooks/pre-commit`, with `scripts/check-file-tokens.mjs`) and a CI workflow (`.github/workflows/check.yml`). `npm install` turns the hook on, in your clone and in each agent's clone. The hook runs `npm run check:fast` when the project has it, else `npm run check`. CI runs the full check. Keep `check:fast` to a few seconds, because agents commit often. |
 
 ## Install
@@ -33,7 +33,7 @@ flowchart LR
 # The host, once per machine. The dry run shows each change first.
 ./init-host.sh --observability phoenix --dry-run
 ./init-host.sh --observability phoenix
-./setup-wizard.sh                  # tokens, firewall, start, then webhook or polling
+./setup-wizard.sh                  # once per repo: one factory each
 
 ln -s "$PWD/sf" ~/.local/bin/sf
 
@@ -48,7 +48,25 @@ cd ~/code/my-app && sf idea "<what you want to build>"
 
 Each init script prints its next steps at the end.
 
-`sf new` makes a React Router, TypeScript and Vitest app, the stack the agent prompts expect. It adds the agent files and the scripts the agents run: `npm run check` (types, then tests) and `npm run build`. It runs both and makes the first commit. Then it asks before it creates the private GitHub repo and the factory labels. After that, rerun `setup-wizard.sh` to point the factory at the new repo.
+`sf new` makes a React Router, TypeScript and Vitest app, the stack the agent prompts expect. It adds the agent files and the scripts the agents run: `npm run check` (types, then tests) and `npm run build`. It runs both and makes the first commit. Then it asks before it creates the private GitHub repo and the factory labels. At the end, it prints the `setup-wizard.sh --repo` command that adds a factory for the new repo.
+
+## One factory per repo
+
+One factory host runs one factory for each repo. All factories share one Inngest server, one runner image, one run network and one slot cap. Each factory has its own name, Inngest app, event names, port, env file, GitHub token and systemd unit.
+
+| Item | Where |
+| --- | --- |
+| Factory name | Lowercase letters, digits and dashes, starting with a letter, 21 characters at most. The wizard proposes one from the repo name. |
+| Shared env file | `/etc/factory/common.env`: the Inngest settings and keys, `CLAUDE_CODE_OAUTH_TOKEN`, `FACTORY_SLOTS` and the trace settings |
+| Factory env file | `/etc/factory/factories/<name>.env`: `GITHUB_REPO`, `FACTORY_PAT`, `PORT`, `GITHUB_WEBHOOK_SECRET`, `GITHUB_POLL` and the other values of one repo. A value here wins over the shared file. |
+| systemd unit | `factory-orchestrator@<name>.service`. The unit sets the factory name, so no env file can change it. |
+| Inngest app | `software-factory-<name>` |
+| Event names | `factory/<name>/<event>`, for example `factory/qf/ratchet.requested` |
+| Port | The wizard picks the highest saved port plus 1, from 3000. The firewall lets Inngest reach ports 3000 to 3099. |
+
+`sf` finds the factory whose `GITHUB_REPO` matches the git origin of the folder. If no factory serves the repo, `sf` offers to run the wizard. Set `ENV_DIR` to read the env files from a folder other than `/etc/factory`. Set `SF_ORCHESTRATOR_URL` and `SF_FACTORY` to use a factory on another machine.
+
+After an update of the orchestrator code, restart every factory: `sudo systemctl restart 'factory-orchestrator@*'`.
 
 ## The `sf` pipeline
 
@@ -97,7 +115,7 @@ Other commands: `sf new`, `sf status`, `sf watch`, `sf logs <text>`, `sf retro`,
 - **GitHub holds the state.** `.sf/state.json` holds only the Claude session id and the spec and map numbers. Git ignores it.
 - **`sf` never merges on its own.** A merge needs two yes answers. The default answer at every stop is "skip".
 - **`sf` needs a terminal.** Without one, it reads one answer per line from stdin and stops when the answers run out. It never answers for you.
-- **The agent view needs Docker access.** `sf` reads the agent containers on the same machine. On another machine, use the Inngest dashboard.
+- **The agent view needs Docker access.** `sf` reads the agent containers on the same machine. It shows only the agents of its repo. On another machine, use the Inngest dashboard.
 
 ## What the factory runs
 
@@ -175,7 +193,7 @@ flowchart LR
 The orchestrator gets GitHub events from a webhook, or it polls GitHub.
 
 - **Webhook:** GitHub calls the orchestrator at once. It needs a public URL.
-- **Polling:** set `GITHUB_POLL=1` in `/etc/factory/orchestrator.env`. A cron function checks the trigger labels and new prototype feedback once a minute. Use it on a laptop with no public URL.
+- **Polling:** set `GITHUB_POLL=1` in the factory env file, `/etc/factory/factories/<name>.env`. A cron function checks the trigger labels and new prototype feedback once a minute. Use it on a laptop with no public URL.
 
 Polling is up to a minute slower. It makes one API call per trigger label a minute, and one per open prototype issue. The token allows 5,000 calls an hour. Duplicate events are safe, because each task removes its trigger label at the start and skips repeats.
 
@@ -188,11 +206,12 @@ Polling is up to a minute slower. It makes one API call per trigger label a minu
 
 ## Limits
 
-- Private GitHub dependencies: `setup-wizard.sh` asks for them and saves `RUN_PRIVATE_DEPS="owner/repo ..."` in the orchestrator env. It checks that `FACTORY_PAT` can read each one. The token step clones each one, and setup installs from those clones with no token. Not yet tested with the runner image's npm.
+- Private GitHub dependencies: `setup-wizard.sh` asks for them and saves `RUN_PRIVATE_DEPS="owner/repo ..."` in the factory env file. It checks that `FACTORY_PAT` can read each one. The token step clones each one, and setup installs from those clones with no token. Not yet tested with the runner image's npm.
 - The issue gate calls two GitHub APIs that are not tested here: the collaborator permission endpoint and the GraphQL `lastEditedAt` and `editor` fields. If a call fails, the factory refuses the stranger's issue. A collaborator's own issue needs neither call.
 - A rebase stops when a workflow file has a conflict. A person resolves it, because the factory never pushes a workflow that an agent wrote.
 - Explore reads at most 100 labelled issues in one run. The rest keep `agent:explore` and wait for the next run.
-- One factory host serves one repo (`GITHUB_REPO`). Run a second orchestrator for a second repo.
+- All factories share the run network `factory-net`. An agent of one factory can reach a server that an agent of another factory started. Give each factory its own `RUNNER_NETWORK` before a factory serves a public repo.
+- `FACTORY_SLOTS` is one cap for the whole host, with no fair share. One factory can hold every slot. A run waits up to 2 hours for a slot.
 - The prototype task posts screenshots and a draft PR. It does not deploy a preview you can click. To try it, check out the PR and follow `prototypes/issue-<n>/README.md`.
 - `init-project.sh` adds the `prototype-needed` verdict only to explore files it creates. In an existing copy, add it to the enum in `.sandcastle/agent-workflows/explore/plan-schema.ts` yourself.
 - The bundled `decompose-prompt.md` names the files and tables of the sample app it came from. Rewrite it for your project before the night shift writes tickets for you.
