@@ -1,5 +1,5 @@
 import { NonRetriableError } from "inngest";
-import { inngest } from "../inngest.ts";
+import { inngest, ev } from "../inngest.ts";
 import * as docker from "../docker.ts";
 import { agentFiles, cloneScript, gh, ghToken, issueCheckFn, issueNumber, owner, parentSpecScript, pushCommits, repo, prRefusal, resetOnFailure, runAgent, safeRef, statusTag } from "../run.ts";
 
@@ -22,7 +22,7 @@ const specScript = (pr: number) => `
 export const reviewPr = inngest.createFunction(
   {
     id: "review-pr",
-    triggers: { event: "factory/review.requested" },
+    triggers: { event: ev("review.requested") },
     singleton: { key: "event.data.prNumber", mode: "skip" }, // one active run per PR
     retries: 1,
     onFailure: resetOnFailure((d) => d.prNumber as number),

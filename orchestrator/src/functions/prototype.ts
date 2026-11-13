@@ -1,4 +1,4 @@
-import { inngest } from "../inngest.ts";
+import { inngest, ev } from "../inngest.ts";
 import * as docker from "../docker.ts";
 import {
   agentFiles, cloneScript, gh, ghToken, issueNumber, owner, promptAgent, pushCommits, repo, resetOnFailure, runAgent, statusTag, ticketScript,
@@ -25,7 +25,7 @@ You build a throwaway prototype, so people can react to how something looks or b
 export const prototypeIssue = inngest.createFunction(
   {
     id: "prototype-issue",
-    triggers: { event: "factory/prototype.requested" },
+    triggers: { event: ev("prototype.requested") },
     // One version at a time per issue. Feedback that lands during a run starts the next one (see "requeue").
     singleton: { key: "event.data.issueNumber", mode: "skip" },
     retries: 1,
@@ -78,7 +78,7 @@ export const prototypeIssue = inngest.createFunction(
       // Sent now, the event would meet this run's singleton and be skipped. prototypeRequeue sends it a minute later.
       // A future `ts` does not delay a run: probed on 2026-11-12, Inngest published it at once and the singleton skipped it.
       await step.run("requeue", async () => {
-        if ((await latestMention(n)) > seen) await inngest.send({ name: "factory/prototype.requeue", data: { issueNumber: n } });
+        if ((await latestMention(n)) > seen) await inngest.send({ name: ev("prototype.requeue"), data: { issueNumber: n } });
       });
       return { prUrl };
     } catch (err) {
@@ -98,11 +98,11 @@ export const prototypeIssue = inngest.createFunction(
 
 /** Starts the next prototype version after the current run has ended. A step.sleep relay, probed on 2026-11-12. */
 export const prototypeRequeue = inngest.createFunction(
-  { id: "prototype-requeue", triggers: { event: "factory/prototype.requeue" }, retries: 1 },
+  { id: "prototype-requeue", triggers: { event: ev("prototype.requeue") }, retries: 1 },
   async ({ event, step }) => {
     const n = issueNumber(event.data.issueNumber);
     await step.sleep("let-the-run-end", "1m");
-    await step.sendEvent("next-version", { name: "factory/prototype.requested", data: { issueNumber: n } });
+    await step.sendEvent("next-version", { name: ev("prototype.requested"), data: { issueNumber: n } });
   },
 );
 

@@ -1,4 +1,4 @@
-import { inngest } from "../inngest.ts";
+import { inngest, ev } from "../inngest.ts";
 import * as docker from "../docker.ts";
 import { agentFiles, cloneScript, gh, ghToken, issueCheckFn, owner, repo, runAgent, statusTag } from "../run.ts";
 
@@ -48,7 +48,7 @@ export function planProblems(plan: { issues?: Entry[] }, batch: number[]): strin
 export const exploreBatch = inngest.createFunction(
   {
     id: "explore-batch",
-    triggers: { event: "factory/explore.requested" },
+    triggers: { event: ev("explore.requested") },
     // Labels often land several at once. Wait for the burst to end, then run once (the course's `sleep 5`).
     debounce: { period: "15s" },
     retries: 0, // the batch labels are already swapped, so a blind retry would explore an empty batch

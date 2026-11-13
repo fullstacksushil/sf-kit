@@ -1,5 +1,5 @@
 import { cron } from "inngest";
-import { inngest } from "../inngest.ts";
+import { inngest, ev } from "../inngest.ts";
 import * as docker from "../docker.ts";
 import { cloneScript, gh, ghToken, owner, promptAgent, repo, runAgent } from "../run.ts";
 
@@ -31,7 +31,7 @@ type Candidate = { title: string; strength: string; body: string };
 export const architectureReview = inngest.createFunction(
   {
     id: "architecture-review",
-    triggers: [cron(process.env.ARCHITECTURE_CRON ?? "0 3 */2 * *"), { event: "factory/architecture.requested" }],
+    triggers: [cron(process.env.ARCHITECTURE_CRON ?? "0 3 */2 * *"), { event: ev("architecture.requested") }],
     singleton: { mode: "skip" },
     retries: 0,
     onFailure: async ({ event }) => docker.cleanup(event.data.run_id),

@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { FACTORY_NAME } from "./inngest.ts";
 
 const exec = promisify(execFile);
 
@@ -44,10 +45,10 @@ export async function oneShot(runId: string, script: string, vars: Record<string
 // One run can start several agents (implement-spec: decompose, notes, merges). `agent` names the container,
 // `runId` names the volumes they share.
 export async function startAgent(runId: string, script: string, vars: Record<string, string>, subject: string, agent = runId): Promise<void> {
-  // The label lets `sf` show which ticket or PR each running agent works on.
+  // The labels let `sf` show which ticket or PR each running agent of its repo works on.
   await exec(
     "docker",
-    ["run", "-d", "--name", `agent-${agent}`, "--label", `factory.subject=${subject}`, ...LIMITS, ...envFlags(vars), ...volumes(runId), "-w", "/work/repo", IMAGE, "bash", "-c", script],
+    ["run", "-d", "--name", `agent-${agent}`, "--label", `factory.subject=${subject}`, "--label", `factory.repo=${process.env.GITHUB_REPO}`, ...LIMITS, ...envFlags(vars), ...volumes(runId), "-w", "/work/repo", IMAGE, "bash", "-c", script],
     { env: { ...process.env, ...vars } },
   );
 }
@@ -65,7 +66,7 @@ export async function agentExists(agent: string): Promise<boolean> {
   return stdout.trim() !== "";
 }
 
-/** Number of agent containers running on this host. The machine-slot count. */
+/** Number of agent containers running on this host, from every factory. The machine-slot count. */
 export async function runningAgents(): Promise<number> {
   const { stdout } = await exec("docker", ["ps", "-q", "--filter", "name=^agent-"]);
   return stdout.split("\n").filter(Boolean).length;
@@ -90,7 +91,7 @@ export function agentEnv(runId: string): Record<string, string> {
       OTEL_TRACES_EXPORTER: "otlp",
       OTEL_EXPORTER_OTLP_TRACES_PROTOCOL: "http/protobuf",
       OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: endpoint,
-      OTEL_RESOURCE_ATTRIBUTES: `factory.run_id=${runId}`,
+      OTEL_RESOURCE_ATTRIBUTES: `factory.run_id=${runId},factory.name=${FACTORY_NAME}`,
     });
     if (process.env.OTEL_TRACES_HEADERS) env.OTEL_EXPORTER_OTLP_TRACES_HEADERS = process.env.OTEL_TRACES_HEADERS;
   }

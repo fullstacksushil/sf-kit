@@ -1,5 +1,5 @@
 import { cron } from "inngest";
-import { inngest } from "../inngest.ts";
+import { inngest, ev } from "../inngest.ts";
 import * as docker from "../docker.ts";
 import {
   cloneScript, gh, ghToken, issueNumber, owner, prRefusal, promptAgent, pushScript, repo, resetOnFailure, runAgent, setupScript, statusTag,
@@ -12,7 +12,7 @@ import {
 const MAX_PER_NIGHT = 20; // the speed control: how many PRs one sweep takes
 
 export const rebaseSweep = inngest.createFunction(
-  { id: "rebase-sweep", triggers: [cron(process.env.REBASE_CRON ?? "0 0 * * *"), { event: "factory/rebase.sweep" }], singleton: { mode: "skip" }, retries: 0 },
+  { id: "rebase-sweep", triggers: [cron(process.env.REBASE_CRON ?? "0 0 * * *"), { event: ev("rebase.sweep") }], singleton: { mode: "skip" }, retries: 0 },
   async ({ step }) => {
     const behind = (await step.run("find-behind-prs", async () => {
       const prs = await gh.paginate(gh.pulls.list, { owner, repo, state: "open", per_page: 100 });
@@ -29,7 +29,7 @@ export const rebaseSweep = inngest.createFunction(
       return out;
     })) as number[];
     // One run per PR, each on its own runner: even a script rebase needs the code.
-    if (behind.length) await step.sendEvent("rebase-each", behind.map((n) => ({ name: "factory/rebase.requested", data: { prNumber: n } })));
+    if (behind.length) await step.sendEvent("rebase-each", behind.map((n) => ({ name: ev("rebase.requested"), data: { prNumber: n } })));
     return { behind };
   },
 );
@@ -47,7 +47,7 @@ A git rebase in this repository stopped on conflicts. Finish it.
 export const rebasePr = inngest.createFunction(
   {
     id: "rebase-pr",
-    triggers: { event: "factory/rebase.requested" },
+    triggers: { event: ev("rebase.requested") },
     singleton: { key: "event.data.prNumber", mode: "skip" },
     retries: 0, // a failed rebase goes to a person, see report-failure
     onFailure: resetOnFailure((d) => d.prNumber as number),
