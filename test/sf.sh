@@ -130,4 +130,22 @@ ok "logs: no activity line, raw lines cleaned" '[ "$(wc -l <<<"$lg")" = 6 ] && g
 lg=$(cd "$T/repo" && "$SF" logs "repo#5" 2>&1 </dev/null)
 lg=$(sed 's/\x1b\[[0-9;]*m//g' <<<"$lg")  # drop sf's own colours
 ok "logs: escapes stripped" 'grep -q "rm -rf /" <<<"$lg" && ! grep -q $'"'"'[\x07\x1b\r]'"'"' <<<"$lg"'
+# herdr hint: fake herdr first on PATH. A fake PATH without the real herdr covers "no herdr".
+mkdir -p "$T/h" "$T/nobin"
+for b in node git sh env dirname readlink; do ln -sf "$(command -v $b)" "$T/nobin/$b"; done
+for b in claude gh docker; do ln -sf "$T/bin/$b" "$T/nobin/$b"; done
+fakeherdr() { printf '#!/bin/sh\n%s\n' "$1" > "$T/h/herdr"; chmod +x "$T/h/herdr"; }
+hint() { (cd "$T/repo" && PATH="$1" "$SF" 2>&1 </dev/null | sed 's/\x1b\[[0-9;]*m//g'); }
+kit=$(cd "$(dirname "$SF")" && pwd)
+fakeherdr 'printf "1 plugin installed:\n- drovr (drovr) enabled [github:x/y]\n"'
+ok "herdr hint: not linked, exact command" 'hint "$T/h:$PATH" | grep -qxF "herdr plugin link $kit/herdr-plugin" || hint "$T/h:$PATH" | grep -qF "herdr plugin link $kit/herdr-plugin"'
+ok "herdr hint: after the agent section" '[ "$(hint "$T/h:$PATH" | tail -1 | grep -c "herdr plugin link")" = 1 ]'
+fakeherdr 'printf "2 plugins installed:\n- drovr (drovr) enabled [github:x/y]\n- sf (sf) enabled [local:/x]\n"'
+ok "herdr hint: linked, no line" 'hint "$T/h:$PATH" | grep -q "^Agents" && ! hint "$T/h:$PATH" | grep -q "herdr plugin"'
+fakeherdr 'echo boom >&2; exit 1'
+ok "herdr hint: herdr fails, no line" 'hint "$T/h:$PATH" | grep -q "^Agents" && ! hint "$T/h:$PATH" | grep -q "herdr plugin"'
+ok "herdr hint: no herdr, no line" 'hint "$T/nobin" | grep -q "^Agents" && ! hint "$T/nobin" | grep -q "herdr plugin"'
+fakeherdr 'printf "1 plugin installed:\n- drovr (drovr) enabled [github:x/y]\n"'
+: > "$T/h/count"; printf '#!/bin/sh\necho x >> "%s/h/count"\necho "- drovr (drovr) enabled"\n' "$T" > "$T/h/herdr"
+ok "herdr hint: checked once per process" '[ "$(cd "$T/repo" && PATH="$T/h:$PATH" "$SF" >/dev/null 2>&1 </dev/null; wc -l < "$T/h/count")" = 1 ]'
 exit $fail
