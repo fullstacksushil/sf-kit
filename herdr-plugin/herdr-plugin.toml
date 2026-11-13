@@ -1,0 +1,26 @@
+id = "sf"
+name = "sf"
+version = "0.1.0"
+description = "Pick a running software factory agent and follow its activity with sf logs."
+platforms = ["linux", "macos"]
+
+[[actions]]
+id = "watch-agent"
+title = "Watch a factory agent…"
+contexts = ["pane", "tab"]
+command = ["sh", "-c", "exec \"$HERDR_BIN_PATH\" plugin pane open --plugin \"$HERDR_PLUGIN_ID\" --entrypoint picker"]
+
+[[panes]]
+id = "picker"
+title = "sf agents"
+placement = "popup"
+width = 90
+height = 20
+command = ["node", "picker.mjs"]
+
+# check: a tab pane stays open after its command exits. The docs say this only for popups and overlays, so follow.sh waits for enter.
+[[panes]]
+id = "follow"
+title = "sf logs"
+placement = "tab"
+command = ["sh", "follow.sh"]
