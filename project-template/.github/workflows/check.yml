@@ -1,4 +1,4 @@
-# From sf-kit. The same checks as the pre-commit hook, on every PR and on main.
+# From sf-kit. The full check on every PR and on main. The pre-commit hook may run the faster check:fast.
 name: check
 on:
   pull_request:

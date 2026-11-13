@@ -8,7 +8,7 @@ Run these in order before you report a change as complete:
 
 <!-- CHANGEME: list the checks that npm run check chains (format, lint, types, boundaries, tests). -->
 
-The pre-commit hook (`.githooks/pre-commit`, turned on by `npm install`) refuses any staged file over 5,000 tokens, then runs `npm run check`. CI runs the same checks on every PR. A change that touches a large file splits it in the same change.
+The pre-commit hook (`.githooks/pre-commit`, turned on by `npm install`) refuses any staged file over 5,000 tokens, then runs `npm run check:fast`, or `npm run check` when there is no `check:fast`. CI runs the full `npm run check` on every PR. A change that touches a large file splits it in the same change.
 
 ## Where things are
 

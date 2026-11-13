@@ -3,4 +3,6 @@
 # The factory's agents commit through it too, because their setup runs npm ci.
 set -e
 git diff --cached --name-only --diff-filter=ACMR -z | xargs -0 node scripts/check-file-tokens.mjs
-exec npm run --silent check
+# Keep the hook fast: check:fast when package.json has it, else check. CI runs the full check on every PR.
+script=$(node -e 'const s=require("./package.json").scripts||{};console.log(s["check:fast"]?"check:fast":"check")')
+exec npm run --silent "$script"
