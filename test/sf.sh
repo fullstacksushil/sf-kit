@@ -22,10 +22,13 @@ W
 chmod +x "$T"/bin/*
 cat > "$T/srv.mjs" <<'S'
 import http from "node:http"; import fs from "node:fs";
-http.createServer((q, r) => { let b = ""; q.on("data", (d) => b += d); q.on("end", () => { fs.appendFileSync(process.argv[2], `${q.url} ${b}\n`); r.end("ok"); }); }).listen(0, "127.0.0.1", function () { fs.writeFileSync(process.argv[3], String(this.address().port)); });
+// /v0/gql answers from $T/gql/apps, $T/gql/runs and $T/gql/run-<id>. A missing file is a GraphQL error, as Inngest gives for an unknown run.
+const gql = (b) => { const qs = JSON.parse(b).query, k = /^\{\s*apps/.test(qs) ? "apps" : /runs\(/.test(qs) ? "runs" : `run-${qs.match(/runID: "(\w+)"/)?.[1]}`;
+  try { return fs.readFileSync(`${process.argv[4]}/gql/${k}`, "utf8"); } catch { return '{"errors":[{"message":"no rows"}],"data":null}'; } };
+http.createServer((q, r) => { let b = ""; q.on("data", (d) => b += d); q.on("end", () => { fs.appendFileSync(process.argv[2], `${q.url} ${b}\n`); r.end(q.url === "/v0/gql" ? gql(b) : "ok"); }); }).listen(0, "127.0.0.1", function () { fs.writeFileSync(process.argv[3], String(this.address().port)); });
 S
 export T="$T" T_LOG="$T/docker.log" T_WIZ="$T/wiz.args" ENV_DIR="$T/env" SF_WIZARD="$T/bin/wiz" HOME="$T/home" XDG_STATE_HOME="$T/state"
-node "$T/srv.mjs" "$T/events.log" "$T/port" & SRV=$!
+node "$T/srv.mjs" "$T/events.log" "$T/port" "$T" & SRV=$!
 while [ ! -s "$T/port" ]; do sleep 0.05; done
 export INNGEST_BASE_URL="http://127.0.0.1:$(cat "$T/port")" PATH="$T/bin:$PATH"
 printf "INNGEST_EVENT_KEY='k123'\n" > "$T/env/common.env"
@@ -148,4 +151,33 @@ ok "herdr hint: no herdr, no line" 'hint "$T/nobin" | grep -q "^Agents" && ! hin
 fakeherdr 'printf "1 plugin installed:\n- drovr (drovr) enabled [github:x/y]\n"'
 : > "$T/h/count"; printf '#!/bin/sh\necho x >> "%s/h/count"\necho "- drovr (drovr) enabled"\n' "$T" > "$T/h/herdr"
 ok "herdr hint: checked once per process" '[ "$(cd "$T/repo" && PATH="$T/h:$PATH" "$SF" >/dev/null 2>&1 </dev/null; wc -l < "$T/h/count")" = 1 ]'
+# runs from Inngest: canned GraphQL answers. The app of factory repo-a is u-a.
+mkdir -p "$T/gql"; : > "$T/ps"
+ago() { date -u -d "-$1" +%Y-%m-%dT%H:%M:%SZ; }
+echo '{"data":{"apps":[{"id":"u-x","externalID":"software-factory-other"},{"id":"u-a","externalID":"software-factory-repo-a"}]}}' > "$T/gql/apps"
+rn() { printf '{"node":{"id":"%s","status":"%s","startedAt":%s,"function":{"name":"%s"}}}' "$@"; }
+printf '{"data":{"runs":{"edges":[%s,%s,%s,%s]}}}' "$(rn R1 RUNNING "\"$(ago '12 min')\"" implement-ticket)" "$(rn R2 QUEUED null review-pr)" \
+  "$(rn R3 RUNNING "\"$(ago '5 min')\"" rebase-pr)" "$(rn R4 RUNNING "\"$(ago '2 sec')\"" github-poll)" > "$T/gql/runs"
+trig() { printf '"t":{"payloads":["{\\"name\\":\\"factory/repo-a/x\\",\\"data\\":{%s},\\"ts\\":1}"]}' "$1"; }
+printf '{"data":{"run":{"trace":{"status":"RUNNING","childrenSpans":[{"name":"executor.nonstep","status":"RUNNING","stepOp":null,"attempts":0,"startedAt":"%s","endedAt":null},{"name":"prepare","status":"COMPLETED","stepOp":"RUN","attempts":0,"startedAt":"%s","endedAt":"%s","duration":540000},{"name":"implement","status":"RUNNING","stepOp":"RUN","attempts":2,"startedAt":"%s","endedAt":null}]}},%s}}' \
+  "$(ago '12 min')" "$(ago '12 min')" "$(ago '3 min')" "$(ago '3 min')" "$(trig '\"issueNumber\":12')" > "$T/gql/run-R1"
+printf '{"data":{"run":{"trace":{"status":"RUNNING","childrenSpans":[{"name":"fetch\\u001b]0;pwned\\u0007","status":"COMPLETED","stepOp":"RUN","attempts":0,"startedAt":"%s","endedAt":"%s"},{"name":"Execution","status":"RUNNING","stepOp":null,"attempts":0,"startedAt":"%s","endedAt":null}]}},%s}}' \
+  "$(ago '5 min')" "$(ago '4 min')" "$(ago '4 min')" "$(trig '\"prNumber\":34')" > "$T/gql/run-R3"
+: > "$T/events.log"
+raw=$(cd "$T/repo" && "$SF" 2>&1 </dev/null); board=$(sed 's/\x1b\[[0-9;]*m//g' <<<"$raw")
+run() { grep -E "^  . $1 " <<<"$board"; }
+ok "runs: a run in a step with its attempt" 'run implement-ticket | grep -Eq "#12 .*step implement · 3m0[0-9]s · attempt 2 · run 12m0[0-9]s"'
+ok "runs: a queued run with no trace" 'run review-pr | grep -q "queued" && ! run review-pr | grep -q "#"'
+ok "runs: PR number, after the last finished step" 'run rebase-pr | grep -Eq "PR #34 .*after fetch +· 4m0[0-9]s · run 5m0[0-9]s" && ! run rebase-pr | grep -q attempt'
+ok "runs: github-poll left out" '! grep -q github-poll <<<"$board"'
+ok "runs: block before the agents" 'grep -n "^Runs\|^Agents" <<<"$board" | head -1 | grep -q Runs'
+ok "runs: Inngest text cleaned" '! grep -qF $'"'"'\x1b]'"'"' <<<"$raw" && ! grep -q $'"'"'\x07'"'"' <<<"$raw"'
+ok "runs: one request per run at most" '[ "$(grep -c "runID" "$T/events.log")" = 3 ]'
+echo '{"data":{"runs":{"edges":[]}}}' > "$T/gql/runs"
+ok "runs: none, one line" '[ "$(cd "$T/repo" && "$SF" 2>&1 </dev/null | grep -c "^.*Runs")" = 1 ] && cd "$T/repo" && "$SF" 2>&1 </dev/null | grep -q "Runs: none"'
+ok "runs: Inngest down, one line, board goes on" '(cd "$T/repo" && INNGEST_BASE_URL=http://127.0.0.1:1 "$SF" 2>&1 </dev/null) | grep -q "Runs: Inngest at http://127.0.0.1:1 does not answer" && (cd "$T/repo" && INNGEST_BASE_URL=http://127.0.0.1:1 "$SF" 2>&1 </dev/null) | grep -q "^.*Agents"'
+echo '{"data":{"apps":[{"id":"u-x","externalID":"software-factory-other"}]}}' > "$T/gql/apps"
+ok "runs: app not found, one line" '(cd "$T/repo" && "$SF" 2>&1 </dev/null) | grep -q "Runs: Inngest has no app software-factory-repo-a"'
+ok "runs: remote factory without an Inngest URL, no block" '! (cd "$T/repo" && env -u INNGEST_BASE_URL SF_ORCHESTRATOR_URL=http://127.0.0.1:1 SF_FACTORY=repo-a "$SF" 2>&1 </dev/null) | grep -q "Runs"'
+ok "runs: remote factory with an Inngest URL, block shown" '(cd "$T/repo" && SF_ORCHESTRATOR_URL=http://127.0.0.1:1 SF_FACTORY=repo-a "$SF" 2>&1 </dev/null) | grep -q "Runs: Inngest has no app software-factory-repo-a"'
 exit $fail

@@ -290,6 +290,36 @@ function followActivity(name) {
   for (const s of [p.stdout, p.stderr]) readline.createInterface({ input: s }).on("line", show);
 }
 
+// ── runs: the factory's Inngest runs, so a run with no agent container (prepare, push, a wait) shows too ──
+// Read-only GraphQL. One deadline per board bounds the requests, so a slow Inngest cannot stall the refresh.
+const gql = (query, signal) => fetch(`${INNGEST}/v0/gql`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ query }), signal })
+  .then((r) => r.json()).then((j) => j.data ?? Promise.reject(new Error("no data")));
+const DONE = new Set(["COMPLETED", "FAILED", "CANCELLED", "SKIPPED"]);
+/** The RUNNING and QUEUED runs, or a string that says why there are none to show. undefined: no block. */
+async function runs() {
+  if (process.env.SF_ORCHESTRATOR_URL && !process.env.INNGEST_BASE_URL) return undefined; // another machine and no Inngest URL: nothing to ask
+  const name = FACTORY?.name ?? (process.env.SF_ORCHESTRATOR_URL ? process.env.SF_FACTORY : findFactory()?.name), app = `software-factory-${name}`;
+  const signal = AbortSignal.timeout(2000), from = new Date(Date.now() - 7 * 86_400_000).toISOString();
+  try {
+    const id = (await gql("{ apps { id externalID } }", signal)).apps.find((a) => a.externalID === app)?.id;
+    if (!id) return `Inngest has no app ${app}.`;
+    const edges = (await gql(`{ runs(first: 11, orderBy: [{field: QUEUED_AT, direction: DESC}], filter: {from: "${from}", appIDs: ["${id}"], status: [RUNNING, QUEUED]}) { edges { node { id status startedAt function { name } } } } }`, signal)).runs.edges;
+    const list = edges.map((e) => e.node).filter((r) => r.function?.name !== "github-poll").slice(0, 10);
+    // One request per run: a run Inngest cannot find (a queued one) fails the whole request, so runs are not batched.
+    return await Promise.all(list.map(async (r) => {
+      const d = /^\w+$/.test(r.id) ? await gql(`{ run(runID: "${r.id}") { trace { childrenSpans { name status stepOp attempts startedAt endedAt } } } t: runTrigger(runID: "${r.id}") { payloads } }`, signal).catch(() => null) : null;
+      let ev = {}; try { ev = JSON.parse(d?.t?.payloads?.[0] ?? "{}")?.data ?? {}; } catch {}
+      // check: seen on 2026-11-13, a RUNNING run lists only finished steps plus "Execution" (stepOp null). Not seen: a step.sleep span.
+      const steps = (d?.run?.trace?.childrenSpans ?? []).filter((s) => s.stepOp), now = steps.findLast((s) => !DONE.has(s.status)), last = steps.findLast((s) => DONE.has(s.status));
+      const ms = (t) => Date.now() - Date.parse(t);
+      const step = now ? `step ${clean(now.name)} · ${dur(ms(now.startedAt))}${now.attempts > 0 ? ` · attempt ${now.attempts}` : ""}`
+        : last ? `after ${clean(last.name)} · ${dur(ms(last.endedAt))}` : r.status === "QUEUED" ? "queued" : "starting";
+      const subject = Number.isInteger(ev.issueNumber) ? `#${ev.issueNumber}` : Number.isInteger(ev.prNumber) ? `PR #${ev.prNumber}` : "";
+      return { fn: clean(r.function?.name), subject, step, age: r.startedAt ? ` · run ${dur(ms(r.startedAt))}` : "" };
+    }));
+  } catch { return `Inngest at ${INNGEST} does not answer.`; }
+}
+
 // The factory that serves this repo: its env file in $ENV_DIR/factories has GITHUB_REPO = origin. Name = file name.
 const envValue = (file, key) => { try { return fs.readFileSync(file, "utf8").match(new RegExp(`^${key}=['"]?([^'"\\n]+)`, "m"))?.[1]; } catch { return undefined; } };
 function findFactory() {
@@ -328,7 +358,7 @@ function herdrNote() {
   }
   return herdrHint;
 }
-function render(st, list, ags) {
+function render(st, list, ags, rns) {
   const w = Math.max(60, process.stdout.columns ?? 100);
   const cut = (s, n = w - 4) => (s.length > n ? s.slice(0, n - 1) + "…" : s);
   const out = [];
@@ -350,6 +380,12 @@ function render(st, list, ags) {
   if (!others.length) out.push(c.d("  none. Label an issue ready-for-agent on GitHub, and sf offers it to the factory."));
   others.forEach(row);
   out.push("");
+  if (typeof rns === "string") out.push(c.d(`Runs: ${rns}`));
+  else if (rns && !rns.length) out.push(c.d("Runs: none running or queued."));
+  else if (rns) {
+    out.push(c.b(`Runs ${rns.length}`) + c.d("  ·  from Inngest"));
+    for (const r of rns) out.push(cut(`  ${c.c("▷")} ${[r.fn, r.subject].filter(Boolean).join(" ")} ${c.d(`· ${r.step}${r.age}`)}`, w + 20));
+  }
   if (ags === null) out.push(c.d("Agents: no docker access on this machine. Open the Inngest dashboard for runs."));
   else if (!ags.length) out.push(c.d("Agents: none running."));
   else {
@@ -377,14 +413,14 @@ async function watch(st, { skip = new Set(), once = false } = {}) {
   function onKey(_s, k) { if (k?.name === "q" || (k?.ctrl && k.name === "c")) quit = true; }
   try {
     for (;;) {
-      const list = tickets(st.spec, st.mode), ags = agents();
+      const list = tickets(st.spec, st.mode), ags = agents(), rns = await runs();
       // A skip lasts while the status lasts. Prototype v2 is "prototype-ready" again, after a run in between.
       for (const t of list) {
         if (lastStatus.has(t.number) && lastStatus.get(t.number) !== t.status) for (const k of skip) if (k.startsWith(`${t.number}:`)) skip.delete(k);
         lastStatus.set(t.number, t.status);
       }
       if (tty) process.stdout.write("\x1b[2J\x1b[H");
-      console.log(render(st, list, ags));
+      console.log(render(st, list, ags, rns));
       if (once) return list;
       const gates = list.filter((t) => GATES.has(t.status) && !skip.has(`${t.number}:${t.status}`));
       const frontier = list.filter((t) => t.status === "frontier" && !skip.has(`${t.number}:frontier`));
@@ -762,7 +798,7 @@ async function board(st) {
   console.log(`Next idea: ${c.b('sf idea "<what you want to build>"')}  ·  Other runs: ${c.b("sf retro")}, ${c.b("sf architecture")}, ${c.b("sf ratchet")}\n`);
   await preflight();
   const view = { mode: "explore" }; // no spec: only the other issues. Never saved.
-  if (!tickets(null).length) { console.log(render(view, [], agents())); return; }
+  if (!tickets(null).length) { console.log(render(view, [], agents(), await runs())); return; }
   await phaseBuild(view);
 }
 
