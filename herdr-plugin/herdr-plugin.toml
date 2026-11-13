@@ -1,6 +1,7 @@
 id = "sf"
 name = "sf"
 version = "0.1.0"
+min_herdr_version = "0.9.1"
 description = "Pick a running software factory agent and follow its activity with sf logs."
 platforms = ["linux", "macos"]
 
