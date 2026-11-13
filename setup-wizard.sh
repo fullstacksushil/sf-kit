@@ -23,7 +23,7 @@ fi
 TOTAL_STAGES=0
 
 _STAGE_INDEX=0
-ENV_FILE="${ENV_FILE:-/etc/factory/orchestrator.env}"  # the orchestrator reads it; init-host.sh creates it
+ENV_FILE=""       # the env file the helpers below read and write; the stages set it
 WRITTEN_ENV=()    # KEYs written to ENV_FILE this run
 WRITTEN_SECRET=() # secret NAMEs set this run
 SKIPPED=()        # things we couldn't do (e.g. gh missing)
@@ -159,7 +159,7 @@ write_env() {
   cat "$tmp" > "$ENV_FILE"
   rm -f "$tmp"
   printf -v "$key" '%s' "$value"
-  WRITTEN_ENV+=("$key")
+  WRITTEN_ENV+=("${ENV_FILE##*/}:$key")
   printf '  %s✓ wrote%s %s → %s\n' "$GREEN" "$RESET" "$key" "$ENV_FILE"
 }
 
@@ -195,7 +195,7 @@ set_var() {
 finish() {
   _clear
   printf '\n%s%s  ✓ Setup complete%s\n' "$BOLD" "$GREEN" "$RESET"
-  (( ${#WRITTEN_ENV[@]} ))    && note "wrote ${#WRITTEN_ENV[@]} value(s) to $ENV_FILE: ${WRITTEN_ENV[*]}"
+  (( ${#WRITTEN_ENV[@]} ))    && note "wrote ${#WRITTEN_ENV[@]} value(s): ${WRITTEN_ENV[*]}"
   (( ${#WRITTEN_SECRET[@]} )) && note "set ${#WRITTEN_SECRET[@]} GitHub secret(s): ${WRITTEN_SECRET[*]}"
   if (( ${#SKIPPED[@]} )); then
     printf '\n'; warn "still to do by hand:"
@@ -205,13 +205,55 @@ finish() {
 }
 
 # ──────────────────────────────────────────────────────────────────────────
-# STAGES: the self-hosted factory host (playbooks/04, Option B). Run after
-# init-host.sh, which generates the Inngest keys and the webhook secret.
+# STAGES: add one factory to the self-hosted factory host (playbooks/04, Option B).
+# Run after init-host.sh, which writes common.env and creates the factories directory.
+# Usage: setup-wizard.sh [--repo owner/name] [--factory <name>]
+# ENV_DIR replaces /etc/factory, for tests.
 # ──────────────────────────────────────────────────────────────────────────
 
-ENV_FILE="${ENV_FILE:-/etc/factory/orchestrator.env}"
+ENV_DIR="${ENV_DIR:-/etc/factory}"
+COMMON="$ENV_DIR/common.env"     # host-wide values: Inngest, Claude token, slots, traces
+FACTORIES="$ENV_DIR/factories"   # one <factory name>.env per factory
+NAME_RULE='^[a-z][a-z0-9-]{0,20}$'   # same rule as orchestrator/src/server.ts
+
+# ask_default VAR "Prompt" DEFAULT reads a value into $VAR. Enter takes DEFAULT. Stops the wizard at EOF.
+ask_default() {
+  local input
+  printf '  %s%s%s%s ' "$BOLD" "$2" "$RESET" "${3:+ [$3]}"   # read -p prints nothing when stdin is a pipe
+  read -r input || { echo; warn "No answer. Stopped."; exit 1; }
+  printf -v "$1" '%s' "${input:-$3}"
+}
+
+# file_value FILE KEY prints KEY from FILE, if any.
+file_value() { local ENV_FILE="$1"; _existing "$2" || true; }
+
+# repo_owner REPO prints the factory env file whose GITHUB_REPO is REPO (any case).
+repo_owner() {
+  local f
+  for f in "$FACTORIES"/*.env; do
+    [[ -f "$f" ]] || continue
+    [[ "$(file_value "$f" GITHUB_REPO | tr 'A-Z' 'a-z')" == "$(tr 'A-Z' 'a-z' <<< "$1")" ]] && { echo "$f"; return; }
+  done
+  return 0
+}
+
+# propose_name REPO prints a factory name from the part after "/": lowercase, other characters
+# to "-", cut to 21, one dash per run of dashes, no dash at either end.
+propose_name() {
+  local p="${1#*/}"; p=$(tr 'A-Z' 'a-z' <<< "$p"); p="${p//[^a-z0-9]/-}"; p="${p:0:21}"
+  p=$(tr -s - <<< "$p"); p="${p#-}"; printf '%s' "${p%-}"
+}
 
 run_wizard() {
+
+REPO_ARG="" FACTORY_ARG=""
+while (( $# )); do
+  case "$1" in
+    --repo) REPO_ARG="${2:-}"; shift 2 ;;
+    --factory) FACTORY_ARG="${2:-}"; shift 2 ;;
+    *) echo "Usage: setup-wizard.sh [--repo owner/name] [--factory <name>]" >&2; exit 2 ;;
+  esac
+done
 
 # The token checks need gh. sudo and non-login shells can drop a mise-installed gh from PATH.
 if ! command -v gh >/dev/null 2>&1; then
@@ -220,20 +262,53 @@ if ! command -v gh >/dev/null 2>&1; then
   else warn "gh is not on PATH. Run this script as your own user, not with sudo, in a shell where gh works."; exit 1; fi
 fi
 
-TOTAL_STAGES=6
+[[ -w "$COMMON" && -w "$FACTORIES" ]] || { echo "Cannot write $COMMON and $FACTORIES. Run sf-kit/init-host.sh first." >&2; exit 1; }
 
-[[ -w "$ENV_FILE" ]] || { echo "Cannot write $ENV_FILE. Run sf-kit/init-host.sh first." >&2; exit 1; }
-banner "Software factory host setup"
+# The shared stages run only on the first run, while common.env lacks their values.
+need_claude=0; [[ -n "$(file_value "$COMMON" CLAUDE_CODE_OAUTH_TOKEN)" ]] || need_claude=1
+# A "no traces" answer saves an empty OTEL_TRACES_HEADERS line, so a later run skips the stage too.
+need_traces=0; grep -q '^OTEL_TRACES_HEADERS=' "$COMMON" || need_traces=1
+TOTAL_STAGES=$((5 + need_claude + need_traces))
 
-# ── 1 ──────────────────────────────────────────────────────────────────────
-stage "The repo"
-say "The factory works on one GitHub repo."
-while :; do
-  ask GITHUB_REPO "Repo as owner/name:"
-  [[ "$GITHUB_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ && "$GITHUB_REPO" != owner/name ]] && break
-  warn "Use the form owner/name, for example acme/web."
+banner "Add a factory to this factory host"
+
+# ── Repo and factory name ─────────────────────────────────────────────────
+stage "The repo and the factory name"
+say "Each factory works on one GitHub repo."
+GITHUB_REPO="$REPO_ARG"
+until [[ "$GITHUB_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ && "$GITHUB_REPO" != owner/name ]]; do
+  [[ -n "$GITHUB_REPO" ]] && { warn "Use the form owner/name, for example acme/web."; [[ -n "$REPO_ARG" ]] && exit 1; }
+  ask_default GITHUB_REPO "Repo as owner/name:" ""
 done
+saved=$(repo_owner "$GITHUB_REPO")
+if [[ -n "$saved" ]]; then
+  # A saved repo means this run edits its factory, so no two factories act on one label.
+  FACTORY=$(basename "$saved" .env)
+  [[ -z "$FACTORY_ARG" || "$FACTORY_ARG" == "$FACTORY" ]] \
+    || { warn "Factory $FACTORY already serves $GITHUB_REPO. Run again with --factory $FACTORY or without --factory."; exit 1; }
+  GITHUB_REPO=$(file_value "$saved" GITHUB_REPO)
+  say "Factory ${BOLD}$FACTORY${RESET} serves $GITHUB_REPO. This run edits it."
+elif [[ -n "$FACTORY_ARG" ]]; then
+  FACTORY="$FACTORY_ARG"
+  [[ "$FACTORY" =~ $NAME_RULE ]] || { warn "Factory name $FACTORY does not match $NAME_RULE."; exit 1; }
+  other=$(file_value "$FACTORIES/$FACTORY.env" GITHUB_REPO)
+  [[ -z "$other" ]] || { warn "Factory $FACTORY already serves $other."; exit 1; }
+else
+  say "The factory name tells factories apart in logs, Inngest and traces."
+  note "Lowercase letters, digits and dashes, starting with a letter, 21 characters at most."
+  proposal=$(propose_name "$GITHUB_REPO"); [[ "$proposal" =~ $NAME_RULE ]] || proposal=""
+  while :; do
+    ask_default FACTORY "Factory name:" "$proposal"
+    if [[ ! "$FACTORY" =~ $NAME_RULE ]]; then warn "Factory names match $NAME_RULE."; continue; fi
+    other=$(file_value "$FACTORIES/$FACTORY.env" GITHUB_REPO)
+    [[ -z "$other" ]] && break
+    warn "Factory $FACTORY already serves $other. Pick another name."
+  done
+fi
+ENV_FILE="$FACTORIES/$FACTORY.env"
 write_env GITHUB_REPO "$GITHUB_REPO"
+# Each factory has its own webhook secret. The orchestrator does not start without one.
+[[ -n "$(_existing GITHUB_WEBHOOK_SECRET || true)" ]] || write_env GITHUB_WEBHOOK_SECRET "$(openssl rand -hex 20)"
 say "Does the project install private GitHub repos (npm git dependencies)? Runs clone them with the token."
 while :; do
   ask RUN_PRIVATE_DEPS "Private deps as owner/name, space-separated (Enter for none):" || RUN_PRIVATE_DEPS=""
@@ -246,7 +321,7 @@ while :; do
 done
 write_env RUN_PRIVATE_DEPS "$RUN_PRIVATE_DEPS"
 
-# ── 2 ──────────────────────────────────────────────────────────────────────
+# ── GitHub token ──────────────────────────────────────────────────────────
 stage "GitHub token (FACTORY_PAT)"
 # pat_problems prints one line per repo the token cannot reach. No output means the token is good.
 pat_problems() {
@@ -267,13 +342,24 @@ if keep_existing FACTORY_PAT "GitHub token"; then
     say "A fine-grained token reaches only the repos you picked. Add the missing ones to it, or create a new one."; fi
 fi
 if (( ! pat_kept )); then
+  # Offer a token of another factory when it already reaches this repo.
+  for f in "$FACTORIES"/*.env; do
+    [[ -f "$f" && "$f" != "$ENV_FILE" ]] || continue
+    FACTORY_PAT=$(file_value "$f" FACTORY_PAT); [[ -n "$FACTORY_PAT" && -z "$(pat_problems)" ]] || continue
+    say "The token of factory $(basename "$f" .env) reaches $token_repos."
+    warn "If you reuse it, one token reaches more than one repo. A leak then exposes all of them."
+    if confirm "Reuse that token?"; then pat_kept=1; write_env FACTORY_PAT "$FACTORY_PAT"; break; fi
+  done
+fi
+if (( ! pat_kept )); then
 say "Create a fine-grained token that can reach only $token_repos."
 open_url "https://github.com/settings/personal-access-tokens/new"
-step "Token name: factory-${GITHUB_REPO#*/}. Pick an expiry you will remember to renew."
+step "Token name: factory-$FACTORY. Pick an expiry you will remember to renew."
 step "Resource owner: ${GITHUB_REPO%%/*}."
 step "Repository access: Only select repositories, then $token_repos."
 step "Permissions, Repository: Contents, Issues, Pull requests = Read and write."
 step "Generate token, then copy it. GitHub shows it only once."
+FACTORY_PAT=""
 while :; do
   ask_secret FACTORY_PAT "Paste the token:"
   problems=$(pat_problems)
@@ -285,27 +371,32 @@ done
 write_env FACTORY_PAT "$FACTORY_PAT"
 fi
 
-# ── 3 ──────────────────────────────────────────────────────────────────────
-stage "Claude token (CLAUDE_CODE_OAUTH_TOKEN)"
-say "Runs use your Claude subscription token."
-if ! keep_existing CLAUDE_CODE_OAUTH_TOKEN "Claude token"; then
-  step "In a second terminal, run: claude setup-token"
-  step "Sign in when the browser opens, then copy the token it prints."
-  ask_secret CLAUDE_CODE_OAUTH_TOKEN "Paste the token:"
-  [[ "$CLAUDE_CODE_OAUTH_TOKEN" == sk-ant-oat* ]] || warn "Subscription tokens usually start with sk-ant-oat. Check the paste."
-  write_env CLAUDE_CODE_OAUTH_TOKEN "$CLAUDE_CODE_OAUTH_TOKEN"
-fi
+# ── Shared: Claude token ──────────────────────────────────────────────────
+if (( need_claude )); then
+ENV_FILE="$COMMON"
+stage "Claude token (CLAUDE_CODE_OAUTH_TOKEN), for every factory"
+say "Runs use your Claude subscription token. A factory env file can override it."
+step "In a second terminal, run: claude setup-token"
+step "Sign in when the browser opens, then copy the token it prints."
+ask_secret CLAUDE_CODE_OAUTH_TOKEN "Paste the token:"
+[[ "$CLAUDE_CODE_OAUTH_TOKEN" == sk-ant-oat* ]] || warn "Subscription tokens usually start with sk-ant-oat. Check the paste."
+write_env CLAUDE_CODE_OAUTH_TOKEN "$CLAUDE_CODE_OAUTH_TOKEN"
 if command -v claude >/dev/null && confirm "Test the token with one short prompt (uses a little of your quota)?"; then
   if out=$(CLAUDE_CODE_OAUTH_TOKEN="$CLAUDE_CODE_OAUTH_TOKEN" claude -p "Reply with the word ok" 2>&1) && [[ "$out" == *ok* ]]; then
     say "${GREEN}✓${RESET} Claude accepted the token"
   else
-    warn "Claude did not accept the token. Run this stage again."; SKIPPED+=("CLAUDE_CODE_OAUTH_TOKEN failed the test")
+    warn "Claude did not accept the token. Remove its line from $COMMON and run this wizard again."; SKIPPED+=("CLAUDE_CODE_OAUTH_TOKEN failed the test")
   fi
 fi
+ENV_FILE="$FACTORIES/$FACTORY.env"
+fi
 
-# ── 4 ──────────────────────────────────────────────────────────────────────
-stage "Agent traces (optional)"
+# ── Shared: traces ────────────────────────────────────────────────────────
+if (( need_traces )); then
+ENV_FILE="$COMMON"
+stage "Agent traces (optional), for every factory"
 current=$(_existing OTEL_TRACES_ENDPOINT || true)
+PHOENIX_API_KEY=""
 if [[ "$current" == *phoenix* ]]; then
   say "Traces go to Phoenix ($current). Phoenix needs sign-in, so the agents need an API key."
   note "On this machine, open http://localhost:6006. On a VPS, tunnel it first: ssh -L 6006:localhost:6006 <you>@<vps-address>"
@@ -319,11 +410,11 @@ if [[ "$current" == *phoenix* ]]; then
     # The key goes to curl on stdin (-K -), not in its arguments, which every local user can read in ps.
     code=$(printf 'header = "Authorization: Bearer %s"\n' "$PHOENIX_API_KEY" | curl -s -K - -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:6006/v1/traces || true)
     if [[ "$code" == 401 || "$code" == 000 ]]; then
-      warn "Phoenix did not accept the key (HTTP $code). Run this stage again."; SKIPPED+=("Phoenix API key failed the test")
+      warn "Phoenix did not accept the key (HTTP $code). Run this wizard again."; SKIPPED+=("Phoenix API key failed the test")
     else
       write_env PHOENIX_API_KEY "$PHOENIX_API_KEY"   # kept so a rerun can offer Enter to keep it
       write_env OTEL_TRACES_HEADERS "Authorization=Bearer $PHOENIX_API_KEY"
-      say "${GREEN}✓${RESET} Phoenix accepted the key. Restart the orchestrator to use it (stage 5 does)."
+      say "${GREEN}✓${RESET} Phoenix accepted the key. Restart running factories to use it: sudo systemctl restart 'factory-orchestrator@*'"
     fi
   fi
 elif confirm "Send agent traces to a self-hosted Langfuse?"; then
@@ -341,26 +432,52 @@ elif confirm "Send agent traces to a self-hosted Langfuse?"; then
   write_env OTEL_TRACES_ENDPOINT "$LANGFUSE_URL/api/public/otel/v1/traces"
   write_env OTEL_TRACES_HEADERS "Authorization=Basic $(printf '%s:%s' "$LANGFUSE_PUBLIC_KEY" "$LANGFUSE_SECRET_KEY" | base64 -w0),x-langfuse-ingestion-version=4"
 else
-  note "No traces. Run this wizard again later to add them."
+  write_env OTEL_TRACES_HEADERS ""
+  note "No traces. To add them later, remove the OTEL_TRACES_HEADERS line from $COMMON and run this wizard again."
   pause
 fi
+ENV_FILE="$FACTORIES/$FACTORY.env"
+fi
 
-# ── 5 ──────────────────────────────────────────────────────────────────────
-stage "Firewall and orchestrator"
-say "Inngest runs in a container and calls the orchestrator on port 3000."
-say "Your firewall must allow that, and block port 3000 for everyone else."
+# ── Port and firewall ─────────────────────────────────────────────────────
+stage "Port and firewall"
+# A new factory takes the highest saved port plus 1, so no stopped factory loses its port.
+port=$(_existing PORT || true)
+if [[ -z "$port" ]]; then
+  port=2999
+  for f in "$FACTORIES"/*.env; do
+    [[ -f "$f" ]] || continue; p=$(file_value "$f" PORT); [[ "$p" =~ ^[0-9]+$ ]] && (( p > port )) && port=$p
+  done
+  port=$((port + 1))
+fi
+say "Inngest calls this factory on its own port, from 3000 to 3099."
+while :; do
+  ask_default PORT "Port:" "$port"
+  [[ "$PORT" =~ ^[0-9]+$ ]] && (( PORT >= 3000 && PORT <= 3099 )) || { warn "Pick a port from 3000 to 3099."; continue; }
+  used=""; for f in "$FACTORIES"/*.env; do
+    [[ -f "$f" && "$f" != "$ENV_FILE" && "$(file_value "$f" PORT)" == "$PORT" ]] && used=$(basename "$f" .env)
+  done
+  [[ -z "$used" ]] && break
+  warn "Factory $used uses port $PORT."
+done
+write_env PORT "$PORT"
+say "Your firewall must let Inngest (a container) reach ports 3000 to 3099, and block them for everyone else."
 if command -v ufw >/dev/null; then
-  note "sudo ufw allow from 172.16.0.0/12 to any port 3000 proto tcp"
-  note "sudo ufw deny 3000/tcp"
+  note "sudo ufw allow from 172.16.0.0/12 to any port 3000:3099 proto tcp"
+  note "sudo ufw deny 3000:3099/tcp"
   if confirm "Add these two ufw rules now (needs sudo)?"; then
-    sudo ufw allow from 172.16.0.0/12 to any port 3000 proto tcp && sudo ufw deny 3000/tcp
+    sudo ufw allow from 172.16.0.0/12 to any port 3000:3099 proto tcp && sudo ufw deny 3000:3099/tcp
   else
-    SKIPPED+=("firewall: allow 172.16.0.0/12 to port 3000, deny the rest")
+    SKIPPED+=("firewall: allow 172.16.0.0/12 to ports 3000-3099, deny the rest")
   fi
 else
-  warn "No ufw here. Allow 172.16.0.0/12 to TCP 3000 in your firewall and block other sources."
-  SKIPPED+=("firewall: allow 172.16.0.0/12 to port 3000, deny the rest")
+  warn "No ufw here. Allow 172.16.0.0/12 to TCP 3000-3099 in your firewall and block other sources."
+  SKIPPED+=("firewall: allow 172.16.0.0/12 to ports 3000-3099, deny the rest")
 fi
+
+# ── Start ─────────────────────────────────────────────────────────────────
+UNIT="factory-orchestrator@$FACTORY"
+stage "Start the factory"
 # init-host.sh copied the orchestrator code once. Offer to copy it again when sf-kit has newer code.
 KIT_ORCH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/orchestrator"
 ORCH_DIR="${ORCH_DIR:-/opt/factory/orchestrator}"
@@ -373,44 +490,44 @@ if (( ${#stale[@]} )); then
     rm -rf "$ORCH_DIR/src" && cp -r "${orch_files[@]/#/$KIT_ORCH/}" "$ORCH_DIR/"
     if [[ " ${stale[*]} " == *" package"* ]]; then npm --prefix "$ORCH_DIR" install --omit=dev --no-audit --no-fund; fi
     say "${GREEN}✓${RESET} copied the orchestrator code to $ORCH_DIR"
+    SKIPPED+=("restart the other factories on the new code: sudo systemctl restart 'factory-orchestrator@*'")
   else
     SKIPPED+=("orchestrator code is older than sf-kit: rerun this wizard to copy it")
   fi
 fi
-if confirm "Start the orchestrator now (sudo systemctl enable --now factory-orchestrator)?"; then
-  sudo systemctl enable factory-orchestrator && sudo systemctl restart factory-orchestrator
-  up() { [[ $(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3000/api/inngest) != 000 ]]; }
+if confirm "Start the factory now (sudo systemctl enable --now $UNIT)?"; then
+  sudo systemctl enable "$UNIT" && sudo systemctl restart "$UNIT"
+  up() { [[ $(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/api/inngest") != 000 ]]; }
   for _ in $(seq 20); do up && break; sleep 1; done
   if up; then
-    say "${GREEN}✓${RESET} the orchestrator answers on port 3000"
+    say "${GREEN}✓${RESET} the factory answers on port $PORT"
   else
-    warn "No answer on port 3000. Read: journalctl -u factory-orchestrator -n 50"
-    SKIPPED+=("orchestrator did not start")
+    warn "No answer on port $PORT. Read: journalctl -u $UNIT -n 50"
+    SKIPPED+=("$UNIT did not start")
   fi
 else
-  SKIPPED+=("start: sudo systemctl enable --now factory-orchestrator")
+  SKIPPED+=("start: sudo systemctl enable --now $UNIT")
 fi
 
-# ── 6 ──────────────────────────────────────────────────────────────────────
+# ── Webhook or polling ────────────────────────────────────────────────────
 stage "GitHub webhook, or polling"
-say "Webhook: GitHub calls the orchestrator at once. It needs a public URL."
-say "Polling: the orchestrator asks GitHub once a minute. No public URL, up to a minute slower."
+say "Webhook: GitHub calls the factory at once. It needs a public URL."
+say "Polling: the factory asks GitHub once a minute. No public URL, up to a minute slower."
 if confirm "No public URL here (a laptop)? Use polling instead of a webhook?"; then
   write_env GITHUB_POLL 1
-  if systemctl is-active --quiet factory-orchestrator 2>/dev/null && confirm "Restart the orchestrator to turn polling on?"; then
-    sudo systemctl restart factory-orchestrator
+  if systemctl is-active --quiet "$UNIT" 2>/dev/null && confirm "Restart the factory to turn polling on?"; then
+    sudo systemctl restart "$UNIT"
   else
-    SKIPPED+=("restart factory-orchestrator to turn polling on")
+    SKIPPED+=("restart $UNIT to turn polling on")
   fi
 else
   # A rerun that switches to the webhook turns polling off, so the two do not both start runs.
   write_env GITHUB_POLL 0
   say "GitHub must reach https://<public host>/webhooks/github."
   step "VPS: install sf-kit/host/Caddyfile in Caddy. It serves /webhooks/* and nothing else."
-  step "Laptop: use a tunnel that forwards only /webhooks/* to port 3000."
+  step "Laptop: use a tunnel that forwards only /webhooks/* to port $PORT."
   ask WEBHOOK_URL "Public webhook URL (https://.../webhooks/github):"
-  secret=$(_existing GITHUB_WEBHOOK_SECRET || true)
-  [[ -n "$secret" ]] || { warn "No GITHUB_WEBHOOK_SECRET in $ENV_FILE. Run init-host.sh again."; exit 1; }
+  secret=$(_existing GITHUB_WEBHOOK_SECRET)
   if command -v gh >/dev/null && gh auth status >/dev/null 2>&1 && confirm "Create the webhook on $GITHUB_REPO with your gh login?"; then
     id=$(gh api "repos/$GITHUB_REPO/hooks" --jq ".[] | select(.config.url == \"$WEBHOOK_URL\") | .id" 2>/dev/null | head -n1 || true)
     [[ -n "$id" ]] && say "A webhook for this URL exists ($id). It gets the current event list and a fresh ping." \
@@ -423,7 +540,7 @@ else
       # GitHub sends a ping on create. A 200 means the URL, Caddy and the secret all work.
       sleep 5
       code=$(gh api "repos/$GITHUB_REPO/hooks/$id/deliveries" --jq '.[0].status_code' 2>/dev/null || true)
-      [[ "$code" == 200 ]] && say "${GREEN}✓${RESET} GitHub's ping reached the orchestrator" \
+      [[ "$code" == 200 ]] && say "${GREEN}✓${RESET} GitHub's ping reached the factory" \
         || { warn "Ping status: ${code:-none}. Check Recent Deliveries on the webhook page."; SKIPPED+=("webhook ping returned ${code:-nothing}"); }
     else
       SKIPPED+=("webhook: gh could not create it (needs admin on $GITHUB_REPO)")
@@ -435,10 +552,10 @@ else
     step "Events: Let me select individual events, then Issues, Issue comments and Pull requests only."
     pause "Press Enter when the webhook shows a green tick"
   fi
-
 fi
 
 finish
+note "Next: sf-kit/init-project.sh --path <your clone of $GITHUB_REPO> --labels"
 note "Test: add the agent:implement label to a small issue in $GITHUB_REPO."
 note "Then run the checks in playbooks/04, \"Checks for Option B\"."
 }
