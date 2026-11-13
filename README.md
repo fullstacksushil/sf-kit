@@ -80,7 +80,7 @@ flowchart TD
 
 The docs change with the code. Each ticket the agents get ends with its parent spec, so the spec's decisions reach the implementer and the reviewer. The implementer adds a new domain term to `GLOSSARY.md` in its PR. The reviewer adds each judgement rule it wanted to `CODING_STANDARDS.md` on the PR branch. You approve both when you merge.
 
-`sf` also shows open issues from outside its spec that carry a factory label. When no idea is in progress, run `sf` to see only these issues. `ready-for-agent` marks an issue as ready, but it starts no run. `sf` offers each such issue to the factory and adds `agent:explore` when you say yes. Explore runs only on issues a collaborator wrote. It takes the label off any other issue and says why in a comment.
+`sf` also shows open issues from outside its spec that carry a factory label. When no idea is in progress, run `sf` to see only these issues. `ready-for-agent` marks an issue as ready, but it starts no run. `sf` offers each such issue to the factory and adds `agent:explore` when you say yes. Explore follows the rule in [Security](#security). It takes the label off an issue that fails it and says why in a comment.
 
 While the factory builds, `sf` shows each ticket's status and the agents' last log lines. It stops when:
 
@@ -166,8 +166,8 @@ flowchart LR
 - **Workflows stay with people.** The factory refuses to push commits that change `.github/workflows` or `.github/actions`. A pushed workflow runs with the repo's Actions secrets. The push step checks this against branches it reads from GitHub, not against the agent's repo. One exception: a rebase keeps a PR's own workflow changes when git merges them with no conflict. The factory refuses an agent's fix of a conflict in a workflow file.
 - **The agent cannot approve.** Review posts inline comments as a plain comment review, never as an approval.
 - **The orchestrator checks input.** It checks branch names and issue numbers before they reach a shell. Review and rebase refuse PRs from forks. `sf` lists only PRs from the repo's own branches, because it offers to merge them.
-- **Only collaborators give orders.** Agents read only issues that an owner, member or collaborator wrote. This covers tickets, specs, parent specs and explore issues. Any other issue stops the run with a message, and a collaborator must file it again. Review goes on without the spec when the PR closes such an issue. Comments count only from collaborators, and so does an `@factory` comment on a prototype.
-- **Limit a public repo.** On a public repo, also use GitHub's interaction limits, so only collaborators can open issues and PRs. The checks above still hold when a limit ends.
+- **Only collaborators give orders.** Agents follow an issue that an owner, member or collaborator wrote. They also follow a stranger's issue after a collaborator labels it, if the stranger changes neither title nor body after that first label. A later edit by a collaborator vouches for the text. The factory checks this after it reads the issue. It covers tickets, specs, parent specs and explore issues. A refused ticket or spec stops the run. The factory leaves out a refused parent spec, and review goes on without a refused spec. Comments count only from collaborators, and so does an `@factory` comment on a prototype.
+- **Limit a public repo.** On a public repo, you can also use GitHub's interaction limits, so only collaborators can open issues and PRs. The checks above still hold without a limit.
 - **Traces need a key.** With `--observability phoenix`, Phoenix runs with auth on. Without it, any container on the run network can read every run's traces. The Phoenix variable names are not tested here.
 
 ## Webhook or polling

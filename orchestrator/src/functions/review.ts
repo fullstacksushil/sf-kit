@@ -1,19 +1,19 @@
 import { NonRetriableError } from "inngest";
 import { inngest } from "../inngest.ts";
 import * as docker from "../docker.ts";
-import { agentFiles, trustedIssueScript, cloneScript, gh, ghToken, issueNumber, owner, parentSpecScript, pushCommits, repo, prRefusal, resetOnFailure, runAgent, safeRef, statusTag } from "../run.ts";
+import { agentFiles, cloneScript, gh, ghToken, issueCheckFn, issueNumber, owner, parentSpecScript, pushCommits, repo, prRefusal, resetOnFailure, runAgent, safeRef, statusTag } from "../run.ts";
 
 // The spec is whatever issue the PR body says it closes, the same rule as the course's review workflow.
 const specScript = (pr: number) => `
   gh pr view ${pr} --repo ${owner}/${repo} --json body --jq .body > /tmp/pr-body.md
   issue=$(grep -oiE '(closes|fixes|resolves) #[0-9]+' /tmp/pr-body.md | head -n1 | grep -oE '[0-9]+' || true)
-  # A collaborator's PR may fix a stranger's bug report. Then the review goes on without that text.
-  if [ -n "$issue" ] && ! ( ${trustedIssueScript('"$issue"')} ) >/dev/null; then
-    echo "No spec available: #$issue was written by someone outside the repo, so the factory does not read it." > /tmp/review-spec.md
-  elif [ -n "$issue" ]; then
+  ${issueCheckFn}
+  if [ -n "$issue" ]; then
     gh issue view "$issue" --repo ${owner}/${repo} --json number,title,body \\
       --jq '"# Ticket #" + (.number|tostring) + ": " + .title + "\\n\\n" + .body' > /tmp/review-spec.md
-    ${parentSpecScript('"$issue"', "/tmp/review-spec.md")}
+    # Read first, then check. A collaborator's PR may fix a stranger's bug report. Then the review goes on without that text.
+    if sf_issue_ok "$issue"; then ${parentSpecScript('"$issue"', "/tmp/review-spec.md")}
+    else echo "No spec available: someone outside the repo wrote or changed #$issue, so the factory does not read it." > /tmp/review-spec.md; fi
   else
     echo "No spec available: this PR does not say which ticket it closes." > /tmp/review-spec.md
   fi

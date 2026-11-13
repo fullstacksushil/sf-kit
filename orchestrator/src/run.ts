@@ -54,43 +54,75 @@ export const cloneScript = (checkout: string) => `
 `;
 
 /**
- * Shell lines that stop the step unless a collaborator wrote issue `issue` (a number or a shell variable such as "$issue").
- * Agents follow what an issue body says, and only its author or a collaborator can edit a body. So on a public repo
- * a stranger cannot hand the agents orders, also not by editing the body after a collaborator added the label.
+ * Defines the shell function sf_issue_ok N: success when agents may follow issue N. Agents follow what an issue
+ * says, so on a public repo a stranger must not hand them orders. Only the author and people with triage access or
+ * more can label an issue or change its title or body. So a stranger's issue counts once a collaborator labels it,
+ * as long as the author changes neither title nor body after that first label. A later change by a collaborator
+ * vouches for the text. Run it after the issue is read, so an edit in between is caught.
+ * check: GET /repos/{owner}/{repo}/collaborators/{username}/permission and its role_name, with the PAT.
+ * check: lastEditedAt and editor on the GraphQL Issue type.
  */
-export const trustedIssueScript = (issue: string) => `
-  case "$(gh api repos/${owner}/${repo}/issues/${issue} --jq .author_association)" in OWNER|MEMBER|COLLABORATOR) ;;
-    *) echo "#${issue} was written by someone outside the repo. The factory does not run on it. A collaborator files it again."; exit 1 ;;
-  esac
+export const issueCheckFn = `
+  sf_issue_ok() {
+    local n="$1" who login events first="" at ev actor rat="" ractor="" eat eeditor
+    who=$(gh api repos/${owner}/${repo}/issues/$n --jq '.author_association + " " + .user.login') || return 1
+    case "\${who%% *}" in OWNER|MEMBER|COLLABORATOR) return 0 ;; esac
+    login="\${who#* }"
+    events=$(gh api --paginate repos/${owner}/${repo}/issues/$n/events \\
+      --jq '.[] | select(.event == "labeled" or .event == "renamed") | "\\(.created_at) \\(.event) \\(.actor.login // "-")"') || return 1
+    # Issue templates and workflows can add labels for anyone, so the label's actor must hold triage or more.
+    while read -r at ev actor; do
+      [ "$ev" = labeled ] || continue
+      case "$(gh api "repos/${owner}/${repo}/collaborators/$actor/permission" --jq .role_name 2>/dev/null || true)" in
+        admin|maintain|write|triage) first="$at"; break ;;
+      esac
+    done <<< "$events"
+    [ -n "$first" ] || return 1
+    while read -r at ev actor; do [ "$ev" = renamed ] && rat="$at" ractor="$actor"; done <<< "$events"
+    [ "$ractor" = "$login" ] && [[ "$rat" > "$first" ]] && return 1
+    read -r eat eeditor < <(gh api graphql -F n="$n" -f o=${owner} -f r=${repo} \\
+      -f query='query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){issue(number:$n){lastEditedAt editor{login}}}}' \\
+      --jq '.data.repository.issue | "\\(.lastEditedAt // "-") \\(.editor.login // "-")"') || return 1
+    [ -n "\${eat:-}" ] || return 1
+    ! { [ "$eeditor" = "$login" ] && [[ "$eat" > "$first" ]]; }
+  }
+`;
+
+/** Shell lines that stop the step unless agents may follow issue `issue` (a number or a shell variable such as "$issue"). */
+export const trustedIssueScript = (issue: string) => `${issueCheckFn}
+  sf_issue_ok ${issue} || { echo "#${issue}: someone outside the repo wrote it, and no collaborator labelled it, or the author changed it after the label. A collaborator edits it to vouch for it, or files it again."; exit 1; }
 `;
 
 /**
  * The ticket goes to a file with only collaborator comments, the filter the course workflows use.
  * Titles, bodies and comments never pass through the shell.
  */
-export const ticketScript = (n: number, file = "/tmp/ticket.md") => `${trustedIssueScript(String(issueNumber(n)))}
+export const ticketScript = (n: number, file = "/tmp/ticket.md") => `
   gh issue view ${issueNumber(n)} --repo ${owner}/${repo} --json number,title,body,comments \\
     | jq '.comments |= map(select((.authorAssociation | IN("OWNER","MEMBER","COLLABORATOR"))
           and (.body | contains("<!-- factory:status -->") | not)))' \\
     | jq -r '"# " + .title + "\\n\\n" + .body + (if (.comments|length) > 0 then "\\n\\n## Comments\\n"
           + ([.comments[] | "\\n### " + .author.login + "\\n\\n" + .body + "\\n"] | join("")) else "" end)' \\
     > ${file}
+  ${trustedIssueScript(String(issueNumber(n)))}
   ${parentSpecScript(String(issueNumber(n)), file)}
 `;
 
 /**
  * Appends the ticket's parent spec (its GitHub sub-issue parent) to a file. The spec's implementation decisions
  * bind every ticket, and the tickets do not repeat them. `issue` is a number or a shell variable such as "$issue".
- * A 404 means the issue has no parent. The endpoint was checked on 2026-11-12:
+ * A 404 means the issue has no parent. A parent that fails sf_issue_ok is left out with a note, and the ticket goes on. The endpoint was checked on 2026-11-12:
  * https://docs.github.com/rest/issues/sub-issues#get-parent-issue
  */
 export const parentSpecScript = (issue: string, file: string) => `
   parent=$(gh api repos/${owner}/${repo}/issues/${issue}/parent --jq .number 2>/dev/null || true)
   case "$parent" in ''|*[!0-9]*) ;; *)
-    ${trustedIssueScript('"$parent"')}
-    gh issue view "$parent" --repo ${owner}/${repo} --json number,title,body \\
+    ptext=$(gh issue view "$parent" --repo ${owner}/${repo} --json number,title,body \\
       --jq '"\\n\\n## Parent spec #" + (.number|tostring) + ": " + .title
-            + "\\n\\nThis ticket builds part of this spec. Its decisions bind the ticket.\\n\\n" + .body' >> ${file} ;;
+            + "\\n\\nThis ticket builds part of this spec. Its decisions bind the ticket.\\n\\n" + .body')
+    ${issueCheckFn}
+    if sf_issue_ok "$parent"; then printf '%s\\n' "$ptext" >> ${file}
+    else printf '\\n\\n## Parent spec #%s left out\\n\\nSomeone outside the repo wrote or changed it.\\n' "$parent" >> ${file}; fi ;;
   esac
 `;
 
@@ -113,8 +145,9 @@ export function prRefusal(data: PrData): string | null {
 }
 
 /** The spec issue to /tmp/spec.md, read as data. */
-export const specFileScript = (spec: number) => `${trustedIssueScript(String(issueNumber(spec)))}
+export const specFileScript = (spec: number) => `
   gh issue view ${issueNumber(spec)} --repo ${owner}/${repo} --json title,body --jq '"# Spec: " + .title + "\\n\\n" + .body' > /tmp/spec.md
+  ${trustedIssueScript(String(issueNumber(spec)))}
 `;
 
 /** Blockers from a ticket body's "## Blocked by" section (the sf convention, see docs/agents/issue-tracker.md). */

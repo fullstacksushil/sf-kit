@@ -1,6 +1,6 @@
 import { inngest } from "../inngest.ts";
 import * as docker from "../docker.ts";
-import { agentFiles, cloneScript, gh, ghToken, owner, repo, runAgent, statusTag } from "../run.ts";
+import { agentFiles, cloneScript, gh, ghToken, issueCheckFn, owner, repo, runAgent, statusTag } from "../run.ts";
 
 // The course's agent-explore.yml as one Inngest function. The agent reads every open
 // `agent:explore` issue as one batch and returns a plan. It holds no GitHub token.
@@ -15,34 +15,19 @@ const NEXT_LABEL: Record<string, string> = {
 };
 
 // Titles, bodies and collaborator comments go into a file. They never pass through the shell.
-// Only the issues in `trusted`: refuseStrangers already took the others out.
-const listScript = (trusted: number[]) => `
+// Read first, then sf_issue_ok, so an edit in between is caught. Prints {batch, refused}.
+const listScript = `
   mkdir -p /tmp/explore
   gh issue list --repo ${owner}/${repo} --state open --label agent:explore --limit 100 \\
-    --json number,title,body,createdAt,comments \\
-    | jq --argjson trusted '${JSON.stringify(trusted.map(Number))}' 'map(select(.number | IN($trusted[])))
-        | map(.comments |= map(select((.authorAssociation | IN("OWNER","MEMBER","COLLABORATOR"))
-          and (.body | contains("<!-- factory:status -->") | not))))' > /tmp/explore/issues.json
-  jq -c '[.[].number] | sort' /tmp/explore/issues.json
+    --json number,title,body,createdAt,comments > "$HOME/all.json"
+  ${issueCheckFn}
+  ok=() refused=()
+  for n in $(jq -r '.[].number' "$HOME/all.json"); do if sf_issue_ok "$n"; then ok+=("$n"); else refused+=("$n"); fi; done
+  jq --argjson ok "$(printf '%s\\n' "\${ok[@]}" | jq -sc .)" 'map(select(.number | IN($ok[])))
+      | map(.comments |= map(select((.authorAssociation | IN("OWNER","MEMBER","COLLABORATOR"))
+        and (.body | contains("<!-- factory:status -->") | not))))' "$HOME/all.json" > /tmp/explore/issues.json
+  jq -c --argjson refused "$(printf '%s\\n' "\${refused[@]}" | jq -sc .)" '{batch: ([.[].number] | sort), refused: $refused}' /tmp/explore/issues.json
 `;
-
-/**
- * The rule of trustedIssueScript: agents read only issues a collaborator wrote. A stranger's issue loses
- * agent:explore and gets one comment, so it does not wait forever and the poll does not start empty runs.
- * Returns the collaborators' issues.
- */
-async function refuseStrangers(): Promise<number[]> {
-  const issues = (await gh.paginate(gh.issues.listForRepo, { owner, repo, state: "open", labels: "agent:explore", per_page: 100 }))
-    .filter((i) => !i.pull_request);
-  const trusted: number[] = [];
-  for (const i of issues) {
-    if (["OWNER", "MEMBER", "COLLABORATOR"].includes(i.author_association ?? "")) { trusted.push(i.number); continue; }
-    await gh.issues.removeLabel({ owner, repo, issue_number: i.number, name: "agent:explore" }).catch(() => {});
-    await gh.issues.createComment({ owner, repo, issue_number: i.number,
-      body: `Someone outside the repo wrote this issue, so the factory does not explore it. A collaborator can file it again.${statusTag}` });
-  }
-  return trusted;
-}
 const hasLabel = (labels: (string | { name?: string })[], name: string) => labels.some((l) => (typeof l === "string" ? l : l.name) === name);
 
 /** The apply job's checks from the course workflow. An empty list means the plan is safe to apply. */
@@ -74,9 +59,15 @@ export const exploreBatch = inngest.createFunction(
     let batch: number[] = [];
     const applied = new Set<number>(); // issues apply has handed on. Steps replay on resume, so this is rebuilt each time.
     try {
-      const trusted = await step.run("refuse-strangers", refuseStrangers);
-      if (trusted.length === 0) return { batch };
-      batch = JSON.parse((await step.run("list-batch", () => docker.oneShot(runId, listScript(trusted), ghToken()))) as string) as number[];
+      const listed = JSON.parse((await step.run("list-batch", () => docker.oneShot(runId, listScript, ghToken()))) as string) as { batch: number[]; refused: number[] };
+      // A refused issue loses agent:explore, so it does not wait forever and the poll does not start empty runs.
+      await step.run("refuse-issues", async () => {
+        for (const n of listed.refused) {
+          await gh.issues.removeLabel({ owner, repo, issue_number: n, name: "agent:explore" }).catch(() => {});
+          await gh.issues.createComment({ owner, repo, issue_number: n, body: `The factory does not explore this issue. Someone outside the repo wrote it, and no collaborator labelled it, or the author changed it after the label. A collaborator can edit it to vouch for it, then add \`agent:explore\` again.${statusTag}` });
+        }
+      });
+      batch = listed.batch;
       if (batch.length === 0) return { batch };
       // agent:explore off, agent:in-progress on, so a second run sees a disjoint batch. A failure here is
       // reported below: every issue already claimed gets agent:blocked and a comment.
