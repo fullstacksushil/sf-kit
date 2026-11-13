@@ -140,7 +140,7 @@ The orchestrator writes the hook into `$HOME/.claude/settings.json` before the a
 
 ### Follow one agent
 
-`sf logs <text>` follows the log of one agent. An exact subject wins. Part of a subject works when only one agent matches. When several agents match, `sf` lists them and stops. Activity lines show as one readable line each, with the time. `sf` prints the other log lines too, with escape and control characters removed.
+`sf logs <text>` follows the log of one agent. An exact subject wins. Part of a subject works when only one agent matches. When several agents match, `sf` lists them and stops. `sf logs --container <container name>` follows one agent container by name and works from any folder. Activity lines show as one readable line each, with the time. When Sandcastle prints its own block for a Bash call, `sf` shows only the activity line for that call. `sf` prints the other log lines too, with escape and control characters removed.
 
 ### The herdr plugin
 
@@ -152,7 +152,7 @@ herdr plugin link <path to sf-kit>/herdr-plugin
 
 When herdr is on the `PATH` and the plugin is not linked, the board prints this command with the path filled in. `sf` never links the plugin itself.
 
-The plugin has one action, "Watch a factory agent" (`watch-agent`). It opens a popup with the running factory agents of all repos on this machine: subject, repo and age. Pick one, and a new tab pane runs `sf logs "<subject>"` in the project folder of that repo. The plugin finds the folder in the list of folders where `sf` saved its state (`.sf/state.json`). It needs `fzf` and `node`.
+The plugin has one action, "Watch a factory agent" (`watch-agent`). It opens a popup with the running factory agents of all repos on this machine: subject, repo and age. Pick one, and a new tab pane runs `sf logs --container <container name>`. That command follows one container from any folder, so the plugin needs no project folder. It needs `fzf` and `node`.
 
 ## What the factory runs
 
@@ -263,4 +263,3 @@ Polling is up to a minute slower. It makes one API call per trigger label a minu
 - A call that a permission dialog denies, or that a `PreToolUse` hook blocks, sends no event to the hook. Source: the [hooks docs](https://code.claude.com/docs/en/hooks), read on 2026-11-13. The call stays `now` until the agent stops.
 - If the image or a start script puts a `$HOME/.claude/settings.json` in the agent container, the orchestrator keeps it. That agent then runs without the hook and prints `sf: ... exists, no activity hook` to its log.
 - The runs block never showed a step that runs now. The code has a row for one, but that row rests on a trace shape that nobody saw. The block reads runs queued in the last 7 days.
-- The herdr picker shows "(no folder known)" for a repo where `sf` never saved its state. Run `sf idea` once in that repo's folder, then pick again.
