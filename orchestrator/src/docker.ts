@@ -53,8 +53,10 @@ export const repoLabel = () => `factory.repo=${(process.env.GITHUB_REPO ?? "").t
 // `duration_ms` as stated on https://code.claude.com/docs/en/hooks, read on 2026-11-13.
 const hook = (fields: string) => ({ hooks: [{ type: "command", command: `{ jq -c '{sf:1,t:(now|todate),ev:.hook_event_name${fields}}' > /proc/1/fd/1; } 2>/dev/null || true` }] });
 const call = ",id:.tool_use_id,tool:.tool_name";
+// `in`: the most useful single value of the input as plain text, else the input as JSON. Cut to 80 characters.
+const input = "(.tool_input as $i | (($i | objects | .command // .file_path // .pattern // .url // .description) // ($i | tostring)) | tostring | .[0:80])";
 const activitySettings = JSON.stringify({ hooks: {
-  PreToolUse: [{ matcher: "*", ...hook(`${call},in:(.tool_input|tostring|.[0:80])`) }],
+  PreToolUse: [{ matcher: "*", ...hook(`${call},in:${input}`) }],
   PostToolUse: [{ matcher: "*", ...hook(`${call},ms:.duration_ms`) }],
   PostToolUseFailure: [{ matcher: "*", ...hook(`${call},ms:.duration_ms`) }],
   PermissionDenied: [{ matcher: "*", ...hook(call) }],

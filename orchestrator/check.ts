@@ -169,8 +169,16 @@ console.log("multi-factory checks ok");
   };
   const cmdIn = { command: 'echo "a"\nb' + "x".repeat(100) };
   const base = { session_id: "s", cwd: "/work/repo", tool_use_id: "u" };
+  // `in` is the most useful value of the input as plain text, cut to 80 characters. A multi-line command stays one line.
   assert.equal(fire("PreToolUse", { ...base, hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: cmdIn }),
-    `{"sf":1,"t":"T","ev":"PreToolUse","id":"u","tool":"Bash","in":${JSON.stringify(JSON.stringify(cmdIn).slice(0, 80))}}\n`);
+    `{"sf":1,"t":"T","ev":"PreToolUse","id":"u","tool":"Bash","in":${JSON.stringify(cmdIn.command.slice(0, 80))}}\n`);
+  assert.equal(fire("PreToolUse", { ...base, hook_event_name: "PreToolUse", tool_name: "Read", tool_input: { file_path: "/work/repo/src/a.ts", limit: 20 } }),
+    `{"sf":1,"t":"T","ev":"PreToolUse","id":"u","tool":"Read","in":"/work/repo/src/a.ts"}\n`);
+  assert.equal(fire("PreToolUse", { ...base, hook_event_name: "PreToolUse", tool_name: "Grep", tool_input: { pattern: "x\\|y", path: "src" } }),
+    `{"sf":1,"t":"T","ev":"PreToolUse","id":"u","tool":"Grep","in":"x\\\\|y"}\n`);
+  const odd = { todos: [{ content: "a", status: "pending" }] };
+  assert.equal(fire("PreToolUse", { ...base, hook_event_name: "PreToolUse", tool_name: "TodoWrite", tool_input: odd }),
+    `{"sf":1,"t":"T","ev":"PreToolUse","id":"u","tool":"TodoWrite","in":${JSON.stringify(JSON.stringify(odd))}}\n`);
   assert.equal(fire("PostToolUse", { ...base, hook_event_name: "PostToolUse", tool_name: "Bash", tool_input: cmdIn, tool_response: {}, duration_ms: 2105 }),
     `{"sf":1,"t":"T","ev":"PostToolUse","id":"u","tool":"Bash","ms":2105}\n`);
   // A failed or denied call closes its id too. Input shapes from https://code.claude.com/docs/en/hooks, read on 2026-11-13.
