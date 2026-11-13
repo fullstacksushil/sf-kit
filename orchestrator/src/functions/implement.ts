@@ -1,11 +1,11 @@
-import { inngest } from "../inngest.ts";
+import { inngest, ev } from "../inngest.ts";
 import * as docker from "../docker.ts";
 import { agentFiles, cloneScript, gh, ghToken, issueNumber, owner, pushCommits, repo, resetOnFailure, runAgent, statusTag, ticketScript } from "../run.ts";
 
 export const implementTicket = inngest.createFunction(
   {
     id: "implement-ticket",
-    triggers: { event: "factory/implement.requested" },
+    triggers: { event: ev("implement.requested") },
     // One active run per ticket. A label added during a run is skipped, so re-add it after.
     // Not `concurrency`: it counts executing steps, and a run waiting on step.sleep holds no slot.
     singleton: { key: "event.data.issueNumber", mode: "skip" },

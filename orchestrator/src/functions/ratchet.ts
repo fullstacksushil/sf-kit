@@ -1,5 +1,5 @@
 import { cron } from "inngest";
-import { inngest } from "../inngest.ts";
+import { inngest, ev } from "../inngest.ts";
 import * as docker from "../docker.ts";
 import { cloneScript, gh, ghToken, owner, pushCommits, repo, runAgent, setupScript } from "../run.ts";
 
@@ -49,7 +49,7 @@ export const lintRatchet = inngest.createFunction(
   {
     id: "lint-ratchet",
     // The cron, plus an event for a manual run or a "PR merged, go again" trigger.
-    triggers: [cron(process.env.RATCHET_CRON ?? "0 6 * * 1-5"), { event: "factory/ratchet.requested" }],
+    triggers: [cron(process.env.RATCHET_CRON ?? "0 6 * * 1-5"), { event: ev("ratchet.requested") }],
     singleton: { mode: "skip" },
     retries: 0,
     onFailure: async ({ event }) => docker.cleanup(event.data.run_id),
