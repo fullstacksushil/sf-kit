@@ -10,6 +10,7 @@
 //   sf                                   resume from where the last step stopped
 //   sf status | sf watch                 the tickets and the agents, once or live
 //   sf logs <text>                       follow the actions of the agent whose subject contains <text>
+//   sf logs --container <name>           follow the agent container <name> (agent-...), from any folder
 //   sf retro | sf architecture | sf ratchet | sf rebase
 //
 // Run it in the project's root. State lives on GitHub (issues, labels, PRs). .sf/state.json keeps only
@@ -853,6 +854,11 @@ switch (cmd) {
   case "status": { const st = need(); if (!st.spec) { console.log(`Step "${st.phase}". No spec yet.`); break; } await watch(st, { once: true }); break; }
   case "watch": { const st = need(); if (!st.spec) die("No spec yet."); await watch(st); break; }
   case "logs": {
+    // --container: the herdr picker knows the container, not the folder. No repo or factory lookup.
+    if (rest[0] === "--container") {
+      if (!/^agent-[A-Za-z0-9_.-]+$/.test(rest[1] ?? "")) die("Give an agent container name: sf logs --container agent-<id>");
+      followActivity(rest[1]); break;
+    }
     const ags = agents() ?? die("No docker access on this machine.");
     // Both sides cleaned: the board shows a cleaned subject, herdr passes the raw one. An exact match wins.
     const q = clean(rest.join(" ")), names = (l) => l.map((x) => clean(x.subject)).join(", ");
@@ -866,5 +872,5 @@ switch (cmd) {
   case "ratchet": await sendEvent("ratchet.requested", "Ratchet run"); break;
   case "rebase": await sendEvent("rebase.sweep", "Rebase sweep"); break;
   case "help": case "-h": case "--help":
-  default: console.log(fs.readFileSync(new URL(import.meta.url), "utf8").split("\n").slice(1, 17).map((l) => l.replace(/^\/\/ ?/, "")).join("\n"));
+  default: console.log(fs.readFileSync(new URL(import.meta.url), "utf8").split("\n").slice(1, 18).map((l) => l.replace(/^\/\/ ?/, "")).join("\n"));
 }

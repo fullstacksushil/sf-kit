@@ -214,6 +214,15 @@ ok "sandcastle: heredoc, agent text kept" 'grep -qF "│  The original bug was" 
 lg=$(cd "$T/repo" && "$SF" logs "repo#s3" 2>&1 </dev/null | sed 's/\x1b\[[0-9;]*m//g')
 ok "plain claude -p log unchanged" '[ "$(wc -l <<<"$lg")" = 4 ] && grep -qE "▶ Read +src/a.ts" <<<"$lg" && grep -qE "✓ Read +12ms" <<<"$lg" && [ "$(sed -n 3,4p <<<"$lg")" = "Done. Bash(npm test) passed.
 │  not a Sandcastle block" ]'
+# L3: sf logs --container follows one agent container by name, from any folder: no repo or factory lookup.
+printf 'x\n' > "$T/logs/agent-r1-k.2_x"; mkdir -p "$T/nowhere"
+: > "$T/docker.log"; lg=$(cd "$T/nowhere" && "$SF" logs --container agent-r1-k.2_x 2>&1 </dev/null); rc=$?
+ok "container: follows it from a folder with no repo" '[ $rc -eq 0 ] && [ "$(cat "$T/docker.log")" = "docker logs -f --tail 200 agent-r1-k.2_x" ] && [ "$lg" = x ]'
+for bad in a3 'agent-' 'agent-x;touch y' '--tail' 'agent-a b' ''; do
+  : > "$T/docker.log"; out=$(cd "$T/nowhere" && "$SF" logs --container "$bad" 2>&1 </dev/null); rc=$?
+  ok "container: rejects '$bad'" '[ $rc -ne 0 ] && [ ! -s "$T/docker.log" ] && grep -q "agent-" <<<"$out"'
+done
+ok "container: in the usage text" '"$SF" help | grep -q "sf logs --container <name>"'
 # subjects: exact match wins, a partial match only when it is the one match. Subject text is cleaned and shell-safe.
 cp "$T/ps" "$T/ps.keep"
 BAD="x'\$(touch $T/pwned)\"y$(printf '\033[31m\330\234') z"
