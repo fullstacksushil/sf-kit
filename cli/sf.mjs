@@ -248,7 +248,8 @@ const shellWord = (s) => `'${clean(s).replace(/'/g, `'\\''`)}'`;
 const activityLine = (l) => { if (!l.startsWith('{"sf":1,')) return null; try { return JSON.parse(l); } catch { return null; } };
 const dur = (ms) => (!Number.isFinite(ms) ? "?" : ms < 1000 ? `${Math.round(ms)}ms` : ms < 60_000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.floor(ms / 60_000)}m${String(Math.floor(ms / 1000) % 60).padStart(2, "0")}s`);
 // A multi-line value (a heredoc, a long command) shows on one line: each whitespace run is one space.
-const action = (e) => `${clean(e.tool).padEnd(6)} ${clean(e.in).replace(/\s+/g, " ").trim()}`;
+const one = (s) => clean(s).replace(/\s+/g, " ").trim();
+const action = (e) => `${clean(e.tool).padEnd(6)} ${one(e.in)}`;
 /** Current action (the last open PreToolUse), the last 3 closed ones, and Stop. Stop closes every open call. */
 const CLOSE = new Set(["PostToolUse", "PostToolUseFailure", "PermissionDenied"]);
 function activity(events) {
@@ -285,16 +286,33 @@ function agents() {
     return { name, subject, since, lines };
   });
 }
-/** sf logs: every log line of one agent as it comes. Activity lines in readable form, other lines cleaned. */
+// Sandcastle 0.14 prints a block for each Bash call: "◇  Bash(<command>" and, for a multi-line command, one line
+// "│  <line>" per command line ("│" alone for an empty one), the last one ending in ")". The hook line follows it.
+// The block is the call it names when its lines rebuild a command that starts with the hook line's `in`.
+function sandcastleBash(block, e) {
+  const ls = block.map((b) => clean(b).trimEnd());
+  if (e?.ev !== "PreToolUse" || e.tool !== "Bash" || !ls.at(-1).endsWith(")") || !one(e.in)) return false;
+  const cmd = [ls[0].slice("◇  Bash(".length), ...ls.slice(1).map((x) => x.slice(3))].join("\n").slice(0, -1);
+  return one(cmd).startsWith(one(e.in));
+}
+/** sf logs: every log line of one agent as it comes. Activity lines in readable form, other lines cleaned.
+ *  A Sandcastle Bash block shows only as its hook line. When in doubt, a line is printed. */
 function followActivity(name) {
   const p = spawn("docker", ["logs", "-f", "--tail", "200", name], { stdio: ["ignore", "pipe", "pipe"] });
+  // ponytail: a block waits for the next line that does not start with "│". A container without the hook holds
+  // a block (and agent text after it) until the next tool call. Upgrade path: flush the block after a second.
+  let block = [];
+  const flush = () => { for (const b of block) console.log(clean(b)); block = []; };
   const show = (l) => {
-    const e = activityLine(l.trim());
+    const e = activityLine(l.trim()), s = clean(l).trimEnd();
+    if (block.length && !e && /^│( |$)/.test(s) && block.length < 200) return void block.push(l);
+    if (sandcastleBash(block, e)) block = []; else flush();
+    if (!e && s.startsWith("◇  Bash(")) return void block.push(l);
     if (!e) return console.log(clean(l));
     const t = new Date(e.t), at = isNaN(t) ? "--:--:--" : t.toLocaleTimeString();
     console.log(`${c.d(at)} ${e.ev === "PreToolUse" ? `${c.y("▶")} ${action(e)}` : e.ev === "PostToolUse" ? `${c.g("✓")} ${clean(e.tool).padEnd(6)} ${dur(Number(e.ms))}` : e.ev === "Stop" ? c.b("■ stop") : clean(e.ev)}`);
   };
-  for (const s of [p.stdout, p.stderr]) readline.createInterface({ input: s }).on("line", show);
+  for (const s of [p.stdout, p.stderr]) readline.createInterface({ input: s }).on("line", show).on("close", flush);
 }
 
 // ── runs: the factory's Inngest runs, so a run with no agent container (prepare, push, a wait) shows too ──
