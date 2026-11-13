@@ -20,9 +20,10 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import readline from "node:readline";
 
+const KIT = new URL("..", import.meta.url).pathname;
 const SF = ".sf", STATE = `${SF}/state.json`;
 const INNGEST = process.env.INNGEST_BASE_URL ?? "http://127.0.0.1:8288";
-const ORCH = process.env.SF_ORCHESTRATOR_URL ?? "http://127.0.0.1:3000";
+const ENV_DIR = process.env.ENV_DIR ?? "/etc/factory";
 const c = { b: (s) => `\x1b[1m${s}\x1b[0m`, d: (s) => `\x1b[2m${s}\x1b[0m`, g: (s) => `\x1b[32m${s}\x1b[0m`, y: (s) => `\x1b[33m${s}\x1b[0m`, r: (s) => `\x1b[31m${s}\x1b[0m`, c: (s) => `\x1b[36m${s}\x1b[0m` };
 
 // ── shell, gh, state ──────────────────────────────────────────────────────
@@ -240,7 +241,7 @@ const GATES = new Set(["pr-ready", "needs-you", "failed", "prototype-ready"]);
 
 // ── agents: docker containers labelled by the orchestrator ───────────────
 function agents() {
-  const out = tryShell("docker", ["ps", "--filter", "label=factory.subject", "--format", '{{.Names}}\t{{.Label "factory.subject"}}\t{{.RunningFor}}']);
+  const out = tryShell("docker", ["ps", "--filter", `label=factory.repo=${repo()}`, "--format", '{{.Names}}\t{{.Label "factory.subject"}}\t{{.RunningFor}}']);
   if (out === null) return null; // no docker access here: the factory runs elsewhere
   return out.trim().split("\n").filter(Boolean).map((l) => {
     const [name, subject, since] = l.split("\t");
@@ -250,8 +251,30 @@ function agents() {
   });
 }
 
+// The factory that serves this repo: its env file in $ENV_DIR/factories has GITHUB_REPO = origin. Name = file name.
+const envValue = (file, key) => { try { return fs.readFileSync(file, "utf8").match(new RegExp(`^${key}=['"]?([^'"\\n]+)`, "m"))?.[1]; } catch { return undefined; } };
+function findFactory() {
+  let files = []; try { files = fs.readdirSync(`${ENV_DIR}/factories`).filter((f) => f.endsWith(".env")).sort(); } catch {}
+  const f = files.find((f) => envValue(`${ENV_DIR}/factories/${f}`, "GITHUB_REPO")?.toLowerCase() === repo().toLowerCase());
+  return f && { name: f.slice(0, -4), url: `http://127.0.0.1:${envValue(`${ENV_DIR}/factories/${f}`, "PORT")}` };
+}
+let FACTORY;
+async function factory() {
+  if (FACTORY) return FACTORY;
+  if (process.env.SF_ORCHESTRATOR_URL) return FACTORY = { name: process.env.SF_FACTORY ?? die("SF_ORCHESTRATOR_URL needs SF_FACTORY, the factory name for event names."), url: process.env.SF_ORCHESTRATOR_URL };
+  FACTORY = findFactory();
+  if (!FACTORY) {
+    const wiz = process.env.SF_WIZARD ?? `${KIT}setup-wizard.sh`, cmd = `${wiz} --repo ${repo()}`;
+    if ((await ask(`No factory serves ${repo()}. Set one up now?`)) !== "y") die(`Run: ${cmd}`);
+    spawnSync(wiz, ["--repo", repo()], { stdio: "inherit" });
+    FACTORY = findFactory() ?? die(`Still no factory for ${repo()}. Run: ${cmd}`);
+  }
+  return FACTORY;
+}
+
 async function factoryUp() {
-  try { await fetch(`${ORCH}/api/inngest`, { signal: AbortSignal.timeout(2000) }); return true; } catch { return false; }
+  const { url } = await factory();
+  try { await fetch(`${url}/api/inngest`, { signal: AbortSignal.timeout(2000) }); return true; } catch { return false; }
 }
 
 // ── rendering ────────────────────────────────────────────────────────────
@@ -327,7 +350,6 @@ async function watch(st, { skip = new Set(), once = false } = {}) {
 
 // ── the pipeline ─────────────────────────────────────────────────────────
 // ── sf new ────────────────────────────────────────────────────────────────
-const KIT = new URL("..", import.meta.url).pathname;
 
 /** A factory-ready project: the base the agents build on, with the checks they run, committed and optionally on GitHub. */
 async function newProject(dir, idea, recommended = false) {
@@ -369,7 +391,7 @@ async function newProject(dir, idea, recommended = false) {
   if (login && (await ask(`Create the private GitHub repo ${login}/${dir}, push, and add the factory labels?`)) === "y") {
     run("GitHub repo", "gh", ["repo", "create", `${login}/${dir}`, "--private", "--source", ".", "--push"]);
     run("Factory labels", `${KIT}init-project.sh`, ["--path", ".", "--labels-only"]);
-    console.log(c.d(`The factory serves one repo. Point it here: rerun setup-wizard.sh and enter ${login}/${dir}.`));
+    console.log(c.d(`Add its factory: ${KIT}setup-wizard.sh --repo ${login}/${dir}`));
   } else {
     console.log(c.d(`Later: gh repo create <owner>/${dir} --private --source . --push, then ${KIT}init-project.sh --path . --labels-only`));
   }
@@ -535,8 +557,9 @@ async function phaseTickets(st) {
 
 async function phaseBuild(st) {
   if (!(await factoryUp())) {
-    console.log(c.y(`The factory does not answer at ${ORCH}.`));
-    console.log(c.d("Set it up with sf-kit/init-host.sh and sf-kit/setup-wizard.sh. Without a public webhook URL, set GITHUB_POLL=1 in /etc/factory/orchestrator.env."));
+    const { url } = await factory();
+    console.log(c.y(`The factory does not answer at ${url}.`));
+    console.log(c.d("Set it up with sf-kit/init-host.sh and sf-kit/setup-wizard.sh. Without a public webhook URL, set GITHUB_POLL=1 in the factory env file in /etc/factory/factories."));
     if ((await ask("Continue anyway (labels wait until the factory runs)?", "yN")) !== "y") return false;
   }
   // The gate before any label: an agent that clones without the planning docs builds on guesses.
@@ -636,7 +659,7 @@ async function phaseDone(st) {
   console.log("Suggested next steps from the course. Each one asks first.");
   if ((await ask("Run /retro on this work? It lists findings only, and you choose which to apply.")) === "y") retro();
   await architecture();
-  if ((await ask("Start a lint ratchet run now?", "yN")) === "y") await sendEvent("factory/ratchet.requested", "Ratchet run");
+  if ((await ask("Start a lint ratchet run now?", "yN")) === "y") await sendEvent("ratchet.requested", "Ratchet run");
   st.phase = "finished"; save(st);
   return false;
 }
@@ -644,15 +667,15 @@ async function phaseDone(st) {
 async function architecture() {
   const a = await ask("Architecture review: [l]ocal session (report + grilling with you), [f]actory run (one ticket per candidate), [s]kip", "lfS");
   if (a === "l") claude([], "/improve-codebase-architecture");
-  if (a === "f") await sendEvent("factory/architecture.requested", "Architecture review");
+  if (a === "f") await sendEvent("architecture.requested", "Architecture review");
 }
 
 const retro = () => claude([], "/retro Review the recent planning sessions and the factory's runs on this repo (issues, PRs, review comments). List findings only. Do not apply any fix. I choose which to accept.");
 
-async function sendEvent(name, what) {
-  // The event key sits in the orchestrator's env file, readable by the user who set up the host.
-  let env = ""; try { env = fs.readFileSync("/etc/factory/orchestrator.env", "utf8"); } catch {}
-  const key = process.env.INNGEST_EVENT_KEY ?? env.match(/^INNGEST_EVENT_KEY=['"]?([^'"\n]+)/m)?.[1];
+async function sendEvent(event, what) {
+  // The event key sits in the shared env file, readable by the user who set up the host.
+  const key = process.env.INNGEST_EVENT_KEY ?? envValue(`${ENV_DIR}/common.env`, "INNGEST_EVENT_KEY");
+  const name = `factory/${(await factory()).name}/${event}`;
   if (!key) die("No INNGEST_EVENT_KEY. Set it in your env, or run sf on the factory host.");
   const r = await fetch(`${INNGEST}/e/${key}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name, data: {} }) })
     .catch((e) => die(`Inngest at ${INNGEST} did not answer (${e.cause?.code ?? e.message}). Is the factory running?`));
@@ -712,8 +735,8 @@ switch (cmd) {
   }
   case "retro": retro(); break;
   case "architecture": await architecture(); break;
-  case "ratchet": await sendEvent("factory/ratchet.requested", "Ratchet run"); break;
-  case "rebase": await sendEvent("factory/rebase.sweep", "Rebase sweep"); break;
+  case "ratchet": await sendEvent("ratchet.requested", "Ratchet run"); break;
+  case "rebase": await sendEvent("rebase.sweep", "Rebase sweep"); break;
   case "help": case "-h": case "--help":
   default: console.log(fs.readFileSync(new URL(import.meta.url), "utf8").split("\n").slice(1, 17).map((l) => l.replace(/^\/\/ ?/, "")).join("\n"));
 }
