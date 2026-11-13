@@ -188,7 +188,7 @@ Polling is up to a minute slower. It makes one API call per trigger label a minu
 
 ## Limits
 
-- Private GitHub dependencies: set `RUN_PRIVATE_DEPS="owner/repo ..."` in the orchestrator env. The token step clones each one, and setup installs from those clones with no token. Not yet tested with the runner image's npm.
+- Private GitHub dependencies: `setup-wizard.sh` asks for them and saves `RUN_PRIVATE_DEPS="owner/repo ..."` in the orchestrator env. It checks that `FACTORY_PAT` can read each one. The token step clones each one, and setup installs from those clones with no token. Not yet tested with the runner image's npm.
 - The issue gate calls two GitHub APIs that are not tested here: the collaborator permission endpoint and the GraphQL `lastEditedAt` and `editor` fields. If a call fails, the factory refuses the stranger's issue. A collaborator's own issue needs neither call.
 - A rebase stops when a workflow file has a conflict. A person resolves it, because the factory never pushes a workflow that an agent wrote.
 - Explore reads at most 100 labelled issues in one run. The rest keep `agent:explore` and wait for the next run.

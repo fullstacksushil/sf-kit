@@ -139,8 +139,11 @@ ask_secret() {
   fi
   read -rs input || rc=1
   printf '\n'
+  # A terminal paste can carry bracketed-paste markers and spaces. A token never has them.
+  input="${input//$'\e[200~'/}"; input="${input//$'\e[201~'/}"; input="${input//[[:space:]]/}"
   if (( rc )) && [[ -z "$input" ]]; then return 1; fi
-  [[ -z "$input" && -n "$current" ]] && input="$current"
+  if [[ -z "$input" && -n "$current" ]]; then input="$current"; say "${DIM}(kept the saved value)${RESET}"
+  elif [[ -n "$input" ]]; then say "${DIM}(got ${#input} characters)${RESET}"; fi
   printf -v "$key" '%s' "$input"
 }
 
@@ -210,6 +213,13 @@ ENV_FILE="${ENV_FILE:-/etc/factory/orchestrator.env}"
 
 run_wizard() {
 
+# The token checks need gh. sudo and non-login shells can drop a mise-installed gh from PATH.
+if ! command -v gh >/dev/null 2>&1; then
+  gh_bin=$(mise which gh 2>/dev/null || true)
+  if [[ -x "$gh_bin" ]]; then PATH="$(dirname "$gh_bin"):$PATH"
+  else warn "gh is not on PATH. Run this script as your own user, not with sudo, in a shell where gh works."; exit 1; fi
+fi
+
 TOTAL_STAGES=6
 
 [[ -w "$ENV_FILE" ]] || { echo "Cannot write $ENV_FILE. Run sf-kit/init-host.sh first." >&2; exit 1; }
@@ -224,29 +234,53 @@ while :; do
   warn "Use the form owner/name, for example acme/web."
 done
 write_env GITHUB_REPO "$GITHUB_REPO"
+say "Does the project install private GitHub repos (npm git dependencies)? Runs clone them with the token."
+while :; do
+  ask RUN_PRIVATE_DEPS "Private deps as owner/name, space-separated (Enter for none):" || RUN_PRIVATE_DEPS=""
+  read -ra deps <<< "$RUN_PRIVATE_DEPS"; RUN_PRIVATE_DEPS="${deps[*]}"   # one space between entries, no globbing
+  bad=""
+  # Same rule as RUN_PRIVATE_DEPS in orchestrator/src/run.ts, so a bad entry fails here and not in a run.
+  for d in $RUN_PRIVATE_DEPS; do [[ "$d" =~ ^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$ && "$d" != *..* ]] || bad+=" $d"; done
+  [[ -z "$bad" ]] && break
+  warn "Not owner/name:$bad"
+done
+write_env RUN_PRIVATE_DEPS "$RUN_PRIVATE_DEPS"
 
 # ── 2 ──────────────────────────────────────────────────────────────────────
 stage "GitHub token (FACTORY_PAT)"
-pat_ok() { [[ "$(GH_TOKEN="$FACTORY_PAT" gh api "repos/$GITHUB_REPO" --jq .permissions.push 2>/dev/null || true)" == true ]]; }
+# pat_problems prints one line per repo the token cannot reach. No output means the token is good.
+pat_problems() {
+  local out d
+  out=$(GH_TOKEN="$FACTORY_PAT" gh api "repos/$GITHUB_REPO" --jq .permissions.push 2>&1 || true)
+  [[ "$out" == true ]] || echo "No write access to $GITHUB_REPO. GitHub said: ${out:-nothing}"
+  for d in $RUN_PRIVATE_DEPS; do
+    out=$(GH_TOKEN="$FACTORY_PAT" gh api "repos/$d" --jq .permissions.pull 2>&1 || true)
+    [[ "$out" == true ]] || echo "No read access to $d. GitHub said: ${out:-nothing}"
+  done
+}
+token_repos="$GITHUB_REPO${RUN_PRIVATE_DEPS:+ $RUN_PRIVATE_DEPS}"
 pat_kept=0
 if keep_existing FACTORY_PAT "GitHub token"; then
-  if pat_ok; then pat_kept=1; say "${GREEN}✓${RESET} the saved token can push to $GITHUB_REPO"
-  else warn "The saved token cannot push to $GITHUB_REPO. A fine-grained token reaches only the repos you picked. Create a new one, or add $GITHUB_REPO to it and paste it again."; fi
+  problems=$(pat_problems)
+  if [[ -z "$problems" ]]; then pat_kept=1; say "${GREEN}✓${RESET} the saved token reaches $token_repos"
+  else while IFS= read -r l; do warn "$l"; done <<< "$problems"
+    say "A fine-grained token reaches only the repos you picked. Add the missing ones to it, or create a new one."; fi
 fi
 if (( ! pat_kept )); then
-say "Create a fine-grained token that can reach only $GITHUB_REPO."
+say "Create a fine-grained token that can reach only $token_repos."
 open_url "https://github.com/settings/personal-access-tokens/new"
 step "Token name: factory-${GITHUB_REPO#*/}. Pick an expiry you will remember to renew."
 step "Resource owner: ${GITHUB_REPO%%/*}."
-step "Repository access: Only select repositories, then $GITHUB_REPO."
+step "Repository access: Only select repositories, then $token_repos."
 step "Permissions, Repository: Contents, Issues, Pull requests = Read and write."
 step "Generate token, then copy it. GitHub shows it only once."
 while :; do
   ask_secret FACTORY_PAT "Paste the token:"
-  push=$(GH_TOKEN="$FACTORY_PAT" gh api "repos/$GITHUB_REPO" --jq .permissions.push 2>/dev/null || true)
-  [[ "$push" == true ]] && { say "${GREEN}✓${RESET} the token can push to $GITHUB_REPO"; break; }
-  warn "GitHub did not give this token write access to $GITHUB_REPO. Check the repo and permissions."
-  confirm "Paste it again?" || { SKIPPED+=("FACTORY_PAT failed the write check"); break; }
+  problems=$(pat_problems)
+  [[ -z "$problems" ]] && { say "${GREEN}✓${RESET} the token reaches $token_repos"; break; }
+  while IFS= read -r l; do warn "$l"; done <<< "$problems"
+  say "An org can require owner approval for fine-grained tokens: https://github.com/organizations/${GITHUB_REPO%%/*}/settings/personal-access-token-requests"
+  confirm "Paste it again?" || { SKIPPED+=("FACTORY_PAT failed the repo check"); break; }
 done
 write_env FACTORY_PAT "$FACTORY_PAT"
 fi
@@ -326,6 +360,22 @@ if command -v ufw >/dev/null; then
 else
   warn "No ufw here. Allow 172.16.0.0/12 to TCP 3000 in your firewall and block other sources."
   SKIPPED+=("firewall: allow 172.16.0.0/12 to port 3000, deny the rest")
+fi
+# init-host.sh copied the orchestrator code once. Offer to copy it again when sf-kit has newer code.
+KIT_ORCH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/orchestrator"
+ORCH_DIR="${ORCH_DIR:-/opt/factory/orchestrator}"
+orch_files=(src package.json package-lock.json tsconfig.json)   # the files init-host.sh copies
+stale=()
+for f in "${orch_files[@]}"; do diff -rq "$KIT_ORCH/$f" "$ORCH_DIR/$f" >/dev/null 2>&1 || stale+=("$f"); done
+if (( ${#stale[@]} )); then
+  warn "$ORCH_DIR differs from sf-kit in: ${stale[*]}"
+  if confirm "Copy the sf-kit code there now? The restart below loads it."; then
+    rm -rf "$ORCH_DIR/src" && cp -r "${orch_files[@]/#/$KIT_ORCH/}" "$ORCH_DIR/"
+    if [[ " ${stale[*]} " == *" package"* ]]; then npm --prefix "$ORCH_DIR" install --omit=dev --no-audit --no-fund; fi
+    say "${GREEN}✓${RESET} copied the orchestrator code to $ORCH_DIR"
+  else
+    SKIPPED+=("orchestrator code is older than sf-kit: rerun this wizard to copy it")
+  fi
 fi
 if confirm "Start the orchestrator now (sudo systemctl enable --now factory-orchestrator)?"; then
   sudo systemctl enable factory-orchestrator && sudo systemctl restart factory-orchestrator

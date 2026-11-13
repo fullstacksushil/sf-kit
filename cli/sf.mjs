@@ -170,11 +170,14 @@ function tickets(spec, mode = "explore") {
     .filter((i) => !inSpec.has(i.number) && labels(i).some((l) => OTHER_LABELS.has(l)) && !labels(i).some((l) => l === "spec" || l.startsWith("wayfinder:")))
     .map((i) => ({ ...i, other: true }));
   list = [...list, ...others];
+  // PRs with a factory label that no listed issue claims, for example a review or rebase you labelled on GitHub.
+  const claimed = (p) => list.some((i) => new RegExp(`(closes|fixes|resolves) #${i.number}\\b`, "i").test(p.body ?? "")) || /Implements spec #\d+\./.test(p.body ?? "");
+  const prRows = prs.filter((p) => p.labels.some((l) => PR_LABELS.has(l.name)) && !claimed(p));
   const byNum = new Map(list.map((i) => [i.number, i]));
   // A blocker outside the spec. A missing one (a typo in "Blocked by") counts as open, so the ticket waits.
   const outsideOpen = (b) => { try { return isOpen(issue(b)); } catch (e) { if (/HTTP 40[34]|HTTP 410/.test(String(e.stderr ?? e.message))) return true; throw e; } };
   const isOpen = (i) => String(i.state).toLowerCase() === "open";
-  const rows = list.map((i) => {
+  const rows = [...list.map((i) => {
     const ls = labels(i);
     const blockedBy = [...new Set([...blockersFromBody(i.body), ...nativeBlockers(i.number)])];
     const openBlockers = blockedBy.filter((b) => { const x = byNum.get(b); return x ? isOpen(x) : outsideOpen(b); });
@@ -198,7 +201,11 @@ function tickets(spec, mode = "explore") {
     else if (i.other) status = ls.includes("ready-for-agent") ? "frontier" : "needs-you";
     else status = mode === "spec" ? "night-shift" : "frontier";
     return { number: i.number, title: i.title, status, blockedBy, openBlockers, pr, other: Boolean(i.other), url: i.url ?? i.html_url ?? `https://github.com/${repo()}/issues/${i.number}` };
-  }).sort((a, b) => Number(a.other) - Number(b.other) || a.number - b.number);
+  }), ...prRows.map((p) => {
+    const ls = p.labels.map((l) => l.name);
+    const status = ls.includes("agent:blocked") ? "failed" : ls.includes("agent:review") ? "reviewing" : "running";
+    return { number: p.number, title: `PR: ${p.title}`, status, blockedBy: [], openBlockers: [], pr: p, other: true, prRow: true, url: p.url };
+  })].sort((a, b) => Number(a.other) - Number(b.other) || a.number - b.number);
   if (mode !== "spec" || !spec) return rows;
   // The night shift's one PR, spec/<n> -> main. Done when it merges, because its "Closes #<spec>" closes the spec.
   const sp = prs.find((p) => p.body?.includes(`Implements spec #${spec}.`));
@@ -213,6 +220,8 @@ function tickets(spec, mode = "explore") {
   return rows;
 }
 
+/** Labels that put a PR on the board when no listed issue claims it. */
+const PR_LABELS = new Set(["agent:review", "agent:rebase", "agent:in-progress", "agent:blocked"]);
 /** Labels that make an issue outside the spec part of the factory's work. */
 const OTHER_LABELS = new Set(["ready-for-agent", "agent:explore", "agent:implement", "agent:prototype", "agent:in-progress", "agent:blocked", "needs-a-human", "prototype"]);
 /** The spec's own tickets. Issues from outside the spec never hold the spec open. */
@@ -264,7 +273,7 @@ function render(st, list, ags) {
     out.push("");
   }
   const others = list.filter((t) => t.other);
-  out.push(c.b(`Other issues ${others.length}`) + c.d("  ·  open issues with a factory label, outside any spec sf runs"));
+  out.push(c.b(`Other issues and PRs ${others.length}`) + c.d("  ·  open, with a factory label, outside any spec sf runs"));
   if (!others.length) out.push(c.d("  none. Label an issue ready-for-agent on GitHub, and sf offers it to the factory."));
   others.forEach(row);
   out.push("");
@@ -359,10 +368,10 @@ async function newProject(dir, idea, recommended = false) {
   const login = tryShell("gh", ["api", "user", "--jq", ".login"])?.trim();
   if (login && (await ask(`Create the private GitHub repo ${login}/${dir}, push, and add the factory labels?`)) === "y") {
     run("GitHub repo", "gh", ["repo", "create", `${login}/${dir}`, "--private", "--source", ".", "--push"]);
-    run("Factory labels", `${KIT}init-project.sh`, ["--path", ".", "--labels"]);
+    run("Factory labels", `${KIT}init-project.sh`, ["--path", ".", "--labels-only"]);
     console.log(c.d(`The factory serves one repo. Point it here: rerun setup-wizard.sh and enter ${login}/${dir}.`));
   } else {
-    console.log(c.d(`Later: gh repo create <owner>/${dir} --private --source . --push, then ${KIT}init-project.sh --path . --labels`));
+    console.log(c.d(`Later: gh repo create <owner>/${dir} --private --source . --push, then ${KIT}init-project.sh --path . --labels-only`));
   }
   if (idea && tryShell("git", ["remote", "get-url", "origin"]) && (await ask("Start the idea now?")) === "y") return startIdea(idea, recommended);
   console.log(`\nNext: ${c.b(`cd ${dir} && sf idea ${recommended ? "--recommended " : ""}"${idea ?? "<what you want to build>"}"`)}`);
@@ -598,7 +607,7 @@ async function phaseBuild(st) {
         const onPr = t.pr && t.pr.labels.some((l) => l.name === "agent:blocked");
         const [kind, num] = onPr ? ["pr", t.pr.number] : ["issue", t.number];
         const last = JSON.parse(gh(kind, "view", String(num), "-R", repo(), "--json", "comments")).comments.filter((x) => x.body.includes("factory:status")).pop();
-        console.log(`${c.r(`${onPr ? `PR #${num} (ticket #${t.number})` : `#${t.number}`} failed`)}: ${t.title}\n  ${(last?.body ?? "").replace(/<!--.*?-->/g, "").trim().slice(0, 300)}`);
+        console.log(`${c.r(`${t.prRow ? `PR #${num}` : onPr ? `PR #${num} (ticket #${t.number})` : `#${t.number}`} failed`)}: ${t.title}\n  ${(last?.body ?? "").replace(/<!--.*?-->/g, "").trim().slice(0, 300)}`);
         if (st.mode === "spec" && !onPr && !t.other) {
           // A night-shift ticket: unpark it, then resume the spec. The night shift starts again from the frontier.
           if ((await ask(`[r]etry: unpark #${t.number} and resume the night shift on spec #${st.spec}, [s]kip`, "rS")) === "r") {

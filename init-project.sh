@@ -13,13 +13,14 @@ SKIP_SKILLS="ask-matt knock-workflows teach setup-matt-pocock-skills"
 
 usage() {
   cat <<EOF
-Usage: $0 [--path DIR] [--new|--existing] [--course-repo DIR] [--labels] [--dry-run]
+Usage: $0 [--path DIR] [--new|--existing] [--course-repo DIR] [--labels|--labels-only] [--dry-run]
 
   --path DIR         Project to set up (default: current directory).
   --new|--existing   Force the mode. Default: existing if the repo has commits.
   --course-repo DIR  Clone of ai-hero-dev/cohort-005-project (default: $COURSE).
                      Skills and .sandcastle/agent-workflows come from its $COURSE_REF branch.
-  --labels           Create the factory labels on the GitHub repo with gh.
+  --labels           Also create the factory labels on the GitHub repo with gh.
+  --labels-only      Create only the labels. Skip the project setup.
   --dry-run          Print what would change. Change nothing.
 EOF
 }
@@ -31,6 +32,7 @@ while [ $# -gt 0 ]; do
     --existing) MODE=existing; shift ;;
     --course-repo) COURSE="$2"; shift 2 ;;
     --labels) LABELS=1; shift ;;
+    --labels-only) LABELS=only; shift ;;
     --dry-run) DRY=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
@@ -59,6 +61,37 @@ place_tree() {
   local src="$1" dest="$2" f
   while IFS= read -r -d '' f; do place "$f" "$dest/${f#"$src"/}"; done < <(find "$src" -type f -print0)
 }
+
+# Create the factory labels on the GitHub repo of $TARGET. --force updates existing ones.
+create_labels() {
+  say "GitHub labels"
+  while IFS='|' read -r name color desc; do
+    if [ "$DRY" = 1 ]; then echo "+ gh label create $name"
+    else gh label create "$name" --color "$color" --description "$desc" --force >/dev/null && echo "label: $name"; fi
+  done <<'EOF'
+agent:explore|5319E7|The factory explores this ticket and tags it
+agent:prototype|5319E7|Build or update a throwaway prototype for this issue
+agent:implement-spec|5319E7|Night shift: build every ticket of this spec into one integration PR
+agent:rebase|5319E7|Rebase this PR onto its base now
+prototype|BFD4F2|Has a prototype. Comment @factory with feedback for the next version
+do-not-merge|B60205|A prototype or experiment. Never merge it
+architecture|C2E0C6|A deepening candidate from the architecture review
+agent:implement|5319E7|Hand this issue to the implementer agent
+agent:review|5319E7|Ask the review agent to read this pull request
+agent:in-progress|FBCA04|An agent is working on this right now
+agent:blocked|B60205|An agent run failed here. Its comment says how to retry
+needs-a-human|D93F0B|The factory stopped here
+ready-for-agent|0E8A16|Specified well enough for an agent to pick up
+spec|1D76DB|A spec from /to-spec. Its sub-issues are the tickets
+wayfinder:map|C5DEF5|A Wayfinder map of decision tickets
+wayfinder:research|C5DEF5|Wayfinder ticket: research, worked by an agent alone
+wayfinder:prototype|C5DEF5|Wayfinder ticket: a prototype to react to
+wayfinder:grilling|C5DEF5|Wayfinder ticket: a grilling session
+wayfinder:task|C5DEF5|Wayfinder ticket: manual work that unblocks a decision
+ratchet|0E8A16|One lint failure fixed by the daily ratchet
+EOF
+}
+if [ "$LABELS" = only ]; then create_labels; exit 0; fi
 
 say "Project: $TARGET ($MODE)"
 if [ "$MODE" = new ] && ! git rev-parse --git-dir >/dev/null 2>&1; then
@@ -214,34 +247,7 @@ if [ "$MODE" = existing ]; then
   fi
 fi
 
-if [ "$LABELS" = 1 ]; then
-  say "GitHub labels"
-  while IFS='|' read -r name color desc; do
-    if [ "$DRY" = 1 ]; then echo "+ gh label create $name"
-    else gh label create "$name" --color "$color" --description "$desc" --force >/dev/null && echo "label: $name"; fi
-  done <<'EOF'
-agent:explore|5319E7|The factory explores this ticket and tags it
-agent:prototype|5319E7|Build or update a throwaway prototype for this issue
-agent:implement-spec|5319E7|Night shift: build every ticket of this spec into one integration PR
-agent:rebase|5319E7|Rebase this PR onto its base now
-prototype|BFD4F2|Has a prototype. Comment @factory with feedback for the next version
-do-not-merge|B60205|A prototype or experiment. Never merge it
-architecture|C2E0C6|A deepening candidate from the architecture review
-agent:implement|5319E7|Hand this issue to the implementer agent
-agent:review|5319E7|Ask the review agent to read this pull request
-agent:in-progress|FBCA04|An agent is working on this right now
-agent:blocked|B60205|An agent run failed here. Its comment says how to retry
-needs-a-human|D93F0B|The factory stopped here
-ready-for-agent|0E8A16|Specified well enough for an agent to pick up
-spec|1D76DB|A spec from /to-spec. Its sub-issues are the tickets
-wayfinder:map|C5DEF5|A Wayfinder map of decision tickets
-wayfinder:research|C5DEF5|Wayfinder ticket: research, worked by an agent alone
-wayfinder:prototype|C5DEF5|Wayfinder ticket: a prototype to react to
-wayfinder:grilling|C5DEF5|Wayfinder ticket: a grilling session
-wayfinder:task|C5DEF5|Wayfinder ticket: manual work that unblocks a decision
-ratchet|0E8A16|One lint failure fixed by the daily ratchet
-EOF
-fi
+[ "$LABELS" = 1 ] && create_labels
 
 say "Result"
 show() { local i=0 f; for f in "$@"; do i=$((i+1)); [ $i -le 12 ] && echo "  ${f#"$TARGET"/}"; done; [ $i -gt 12 ] && echo "  ... and $((i-12)) more"; return 0; }
