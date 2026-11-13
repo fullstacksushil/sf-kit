@@ -33,4 +33,9 @@ u "--retry-all-errors"
 u "--max-time"
 grep -q '^ExecStartPost=-' "$U" && { echo "FAIL: ExecStartPost has - prefix"; FAIL=1; }
 grep -q -- '--sdk-url' "$KIT/host/compose.yaml" && { echo "FAIL: compose has --sdk-url"; FAIL=1; }
+# No flock on the host: stop with a message, also in --dry-run. The PATH copy has every tool but flock.
+mkdir "$T/noflock"; IFS=: read -ra dirs <<<"$T:$PATH"
+for d in "${dirs[@]}"; do for f in "$d"/*; do b="${f##*/}"; [ "$b" = flock ] || [ -e "$T/noflock/$b" ] || ln -s "$f" "$T/noflock/$b" 2>/dev/null; done; done
+OUT="$(PATH="$T/noflock" "$KIT/init-host.sh" --dry-run 2>&1)" && { echo "FAIL: ran without flock"; FAIL=1; }
+has "Missing: flock"
 [ "$FAIL" = 0 ] && echo "init-host test: ok"; exit "$FAIL"

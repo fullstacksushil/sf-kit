@@ -240,15 +240,19 @@ export async function pushCommits(step: Step, runId: string, branch: string, opt
  * A child `flock` holds the lock until its stdin closes. The kernel drops the lock when that child or this
  * process dies, so a dead holder never blocks the others. The file's contents do not matter.
  */
-// ponytail: fn has no time limit, so a hung fn holds every factory's slot lock. The wait gives up after 5 minutes.
+// ponytail: fn has no time limit, so a hung fn holds every factory's slot lock. The wait gives up after 5 minutes
+// with a LockTimeout, and runAgent counts that as "no slot now".
 // Needs util-linux flock on the host, and every factory must run as the same user (sticky /tmp refuses others' files).
-export async function hostLock<T>(fn: () => Promise<T>, path = "/tmp/factory-slots.flock"): Promise<T> {
-  const child = spawn("flock", ["-x", "-w", "300", path, "sh", "-c", "echo held; exec cat"], { stdio: ["pipe", "pipe", "inherit"] });
+export async function hostLock<T>(fn: () => Promise<T>, path = "/tmp/factory-slots.flock", waitSeconds = 300): Promise<T> {
+  // -E 75: a timeout exits 75, apart from flock's own errors (1).
+  const child = spawn("flock", ["-x", "-w", String(waitSeconds), "-E", "75", path, "sh", "-c", "echo held; exec cat"], { stdio: ["pipe", "pipe", "inherit"] });
   child.stdin.on("error", () => {});
   await new Promise<void>((res, rej) => {
     child.stdout.once("data", () => res());
     child.once("error", rej);
-    child.once("exit", (code) => rej(new Error(`flock on ${path} exited with code ${code} before it held the lock.`)));
+    child.once("exit", (code) => rej(code === 75
+      ? new LockTimeout(`The wait for the slot lock ${path} timed out after ${waitSeconds} seconds.`)
+      : new Error(`flock on ${path} exited with code ${code} before it held the lock.`)));
   });
   try {
     return await fn();
@@ -256,6 +260,8 @@ export async function hostLock<T>(fn: () => Promise<T>, path = "/tmp/factory-slo
     child.stdin.end();
   }
 }
+
+export class LockTimeout extends Error {}
 
 let slotQueue: Promise<unknown> = Promise.resolve();
 /** Run fn after every earlier caller of this process, under the host lock that the other factories also take. */
@@ -289,7 +295,7 @@ export async function runAgent(step: Step, runId: string, prepare: string | null
       if ((await docker.runningAgents()) >= SLOTS) return false;
       await docker.startAgent(runId, agentScript, docker.agentEnv(runId), subject, agent);
       return true;
-    }))) as boolean;
+    }).catch((e) => { if (e instanceof LockTimeout) return false; throw e; }))) as boolean;
     if (started) break;
     if (i >= 120) throw new Error(`No free machine slot for 2 hours (FACTORY_SLOTS=${SLOTS}).`);
     await step.sleep(id(`wait-slot-${i}`), "1m");

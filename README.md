@@ -200,6 +200,7 @@ Polling is up to a minute slower. It makes one API call per trigger label a minu
 ## Requirements
 
 - Host: Docker with the compose plugin, Node 22 or later, `sudo`, and a user in the `docker` group.
+- Host: `flock` from util-linux. The factories on one host share their machine slots through an `flock` lock.
 - Project: `gh` for `--labels`. `init-project.sh` copies the skills and agent scripts from a clone at `../cohort-005-project`. The clone needs the `live-run-through` branch.
 - Each project needs `npm i -D @ai-hero/sandcastle@^0.14 tsx zod@^3.25`. The agent scripts import all three.
 - `sf`: Node 22 or later, `gh` signed in, and `claude`.
