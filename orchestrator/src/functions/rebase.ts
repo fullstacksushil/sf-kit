@@ -73,7 +73,9 @@ export const rebasePr = inngest.createFunction(
       const how = ((await step.run("try-rebase", () => docker.oneShot(runId, `
         cd repo
         test "$(git rev-parse HEAD)" = "${pr.sha}" || { echo "The PR moved since it was read."; exit 1; }
-        git rev-list --count origin/${pr.base}..HEAD > /tmp/pr-commits
+        # Count only the commits whose patch is not on the base. A stacked PR holds commits that the base already
+        # got from an earlier merge, and the rebase drops those. First seen on qf-web-dev PR #39, 2026-11-14.
+        git rev-list --count --cherry-pick --right-only origin/${pr.base}...HEAD > /tmp/pr-commits
         git diff origin/${pr.base}...HEAD -- .github/workflows .github/actions > /tmp/pr-workflows.diff
         if git -c core.hooksPath=/dev/null rebase -q origin/${pr.base} >/dev/null 2>&1; then echo clean; else echo conflict; fi
       `))) as string).trim().split("\n").pop();
