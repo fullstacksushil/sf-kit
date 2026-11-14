@@ -11,6 +11,11 @@ OBS=none DRY=0 SYSTEMD=1
 SUBNET=172.30.0.0/24
 ETC=/etc/factory OPT=/opt/factory
 ME="$(id -un)"
+# The service runs as the user who runs this script. With sudo that user is root: the service then cannot open
+# the files that the operator's service made (the slot lock in /tmp), and /opt/factory changes owner.
+if [ "$(id -u)" = 0 ] && [ "${SUDO_USER:-root}" != root ]; then
+  echo "Run init-host.sh without sudo, as $SUDO_USER. The script calls sudo for the steps that need it." >&2; exit 1
+fi
 
 usage() {
   cat <<EOF

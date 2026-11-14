@@ -38,4 +38,10 @@ mkdir "$T/noflock"; IFS=: read -ra dirs <<<"$T:$PATH"
 for d in "${dirs[@]}"; do for f in "$d"/*; do b="${f##*/}"; [ "$b" = flock ] || [ -e "$T/noflock/$b" ] || ln -s "$f" "$T/noflock/$b" 2>/dev/null; done; done
 OUT="$(PATH="$T/noflock" "$KIT/init-host.sh" --dry-run 2>&1)" && { echo "FAIL: ran without flock"; FAIL=1; }
 has "Missing: flock"
+# Run with sudo by an operator: stop, also in --dry-run. A fake id reports root.
+mkdir "$T/asroot"; printf '#!/bin/sh\ncase "$1" in -u) echo 0;; *) echo root;; esac\n' >"$T/asroot/id"; chmod +x "$T/asroot/id"
+OUT="$(PATH="$T/asroot:$PATH" SUDO_USER=operator "$KIT/init-host.sh" --dry-run 2>&1)" && { echo "FAIL: ran with sudo"; FAIL=1; }
+has "without sudo, as operator"
+# A root login without sudo is allowed.
+PATH="$T/asroot:$PATH" SUDO_USER= "$KIT/init-host.sh" --dry-run >/dev/null 2>&1 || { echo "FAIL: root login refused"; FAIL=1; }
 [ "$FAIL" = 0 ] && echo "init-host test: ok"; exit "$FAIL"

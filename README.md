@@ -49,6 +49,8 @@ cd ~/code/my-app && sf idea "<what you want to build>"
 
 Each init script prints its next steps at the end.
 
+Run `init-host.sh` as your own user, without `sudo`. The script calls `sudo` for the steps that need it. The factory services run as the user who runs the script. With `sudo` that user is `root`, and then no agent run starts: the service cannot open the slot lock `/tmp/factory-slots.flock` that your user owns. The script stops with a message when you run it with `sudo`. To deploy a new version of the kit, run `./init-host.sh` again, then restart each factory with `sudo systemctl restart factory-orchestrator@<name>`.
+
 `sf new` makes a React Router, TypeScript and Vitest app, the stack the agent prompts expect. It adds the agent files and the scripts the agents run: `npm run check` (types, then tests) and `npm run build`. It runs both and makes the first commit. Then it asks before it creates the private GitHub repo and the factory labels. At the end, it prints the `setup-wizard.sh --repo` command that adds a factory for the new repo.
 
 ## One factory per repo
