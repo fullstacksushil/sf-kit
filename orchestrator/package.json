@@ -16,5 +16,8 @@
     "@types/express": "^5.0.0",
     "@types/node": "^22.0.0",
     "typescript": "^5.9.0"
+  },
+  "overrides": {
+    "@opentelemetry/api": "1.9.1"
   }
 }
