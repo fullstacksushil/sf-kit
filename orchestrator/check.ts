@@ -221,3 +221,38 @@ console.log("multi-factory checks ok");
   assert.ok(tailForMessage("x".repeat(5000)).length === 600 && tailForMessage("") === "");
 }
 console.log("activity hook checks ok");
+
+{ // Machines: FACTORY_MACHINES lists where agents run, with a slot count each. Without it: local with FACTORY_SLOTS.
+  const { parseMachines } = await import("./src/docker.ts");
+  assert.deepEqual(parseMachines(undefined, "3"), [{ target: "local", slots: 3 }]);
+  assert.deepEqual(parseMachines(undefined, undefined), [{ target: "local", slots: 2 }]);
+  assert.deepEqual(parseMachines(" local=2  ssh://factory@linux-box=3 ssh://f@mac-mini.tail1.ts.net:2222=0 ", "9"),
+    [{ target: "local", slots: 2 }, { target: "ssh://factory@linux-box", slots: 3 }, { target: "ssh://f@mac-mini.tail1.ts.net:2222", slots: 0 }]);
+  for (const bad of ["local", "local=", "local=x", "local=-1", "local=1.5", "http://h=2", "ssh://h=1", "ssh://u@h;id=1", "ssh://-oProxyCommand=x@h=1", "local=1 local=2", ""])
+    assert.throws(() => parseMachines(bad, "2"), /FACTORY_MACHINES/, JSON.stringify(bad));
+  process.env.FACTORY_MACHINES = "local=1 ssh://u@h;id=1";
+  await assert.rejects(import("./src/docker.ts?badmachines"), /FACTORY_MACHINES/, "a bad list stops the orchestrator at start");
+  delete process.env.FACTORY_MACHINES;
+}
+{ // Every docker call goes to its machine: DOCKER_HOST for a remote one, the process env for local. Every call has a timeout.
+  const { dockerCall, runningAgents } = await import("./src/docker.ts");
+  const { writeFileSync, chmodSync } = await import("node:fs");
+  const dir = mkdtempSync(`${tmpdir()}/sf-machine-`);
+  writeFileSync(`${dir}/docker`, `#!/bin/sh\necho "\${DOCKER_HOST:-none} $*" >> "${dir}/log"\n[ "$1" = hang ] && exec sleep 5\n[ "$1" = ps ] && printf 'a\\nb\\n'\nexit 0\n`);
+  chmodSync(`${dir}/docker`, 0o755);
+  const path = process.env.PATH;
+  process.env.PATH = `${dir}:${path}`;
+  try {
+    await dockerCall("local", ["info"]);
+    await dockerCall("ssh://factory@linux-box", ["info"]);
+    assert.equal(await runningAgents("ssh://factory@linux-box"), 2);
+    assert.equal(await runningAgents(), 2, "the default machine is local");
+    assert.deepEqual(readFileSync(`${dir}/log`, "utf8").trim().split("\n"), [
+      "none info", "ssh://factory@linux-box info",
+      "ssh://factory@linux-box ps -q --filter name=^agent-", "none ps -q --filter name=^agent-"]);
+    const t = Date.now();
+    await assert.rejects(dockerCall("local", ["hang"], { timeout: 300 }), /timed out after 300 ms/);
+    assert.ok(Date.now() - t < 3000, "the timeout ends a hung call");
+  } finally { process.env.PATH = path; }
+}
+console.log("machine checks ok");

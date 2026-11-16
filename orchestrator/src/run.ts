@@ -17,7 +17,8 @@ export const PRIVATE_DEPS = (process.env.RUN_PRIVATE_DEPS ?? "").split(/\s+/).fi
   return d;
 });
 const MAX_MINUTES = Number(process.env.RUN_MAX_MINUTES ?? 45);
-export const SLOTS = Number(process.env.FACTORY_SLOTS ?? 2);
+// The factory host's own slots, from FACTORY_MACHINES (or FACTORY_SLOTS without it). Worker machines get runs in a later step.
+export const SLOTS = docker.MACHINES.find((m) => m.target === docker.LOCAL)?.slots ?? 0;
 
 /** The parts of Inngest's step tools that a run uses. */
 export type Step = {

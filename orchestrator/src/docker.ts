@@ -4,6 +4,41 @@ import { FACTORY_NAME } from "./inngest.ts";
 
 const exec = promisify(execFile);
 
+// ── machines: where agent containers run ─────────────────────────────────
+// FACTORY_MACHINES="local=2 ssh://factory@linux-box=3": a target and its slot count. `local` is the factory host's
+// own Docker. An ssh target is a worker machine's Docker, reached with DOCKER_HOST. Without the list: local=FACTORY_SLOTS.
+export const LOCAL = "local";
+export type Machine = { target: string; slots: number };
+// A host name, an optional port, and a user. The strict shape keeps ssh options (`-o...`) and shell text out.
+const SSH_TARGET = /^ssh:\/\/[A-Za-z0-9._][A-Za-z0-9._-]*@[A-Za-z0-9][A-Za-z0-9.-]*(:\d{1,5})?$/;
+export function parseMachines(list: string | undefined, slots: string | undefined): Machine[] {
+  if (list === undefined) return [{ target: LOCAL, slots: Number(slots ?? 2) }];
+  const bad = (why: string) => { throw new Error(`FACTORY_MACHINES: ${why}. Write it as "local=2 ssh://user@host=3".`); };
+  const machines = list.split(/\s+/).filter(Boolean).map((entry) => {
+    const at = entry.lastIndexOf("="), target = entry.slice(0, at), n = entry.slice(at + 1);
+    if (at < 0 || !/^\d+$/.test(n)) bad(`no slot count in ${JSON.stringify(entry)}`);
+    if (target !== LOCAL && !SSH_TARGET.test(target)) bad(`not local or ssh://user@host: ${JSON.stringify(target)}`);
+    return { target, slots: Number(n) };
+  });
+  if (!machines.length) bad("the list is empty");
+  if (new Set(machines.map((m) => m.target)).size !== machines.length) bad("a machine is listed twice");
+  return machines;
+}
+export const MACHINES = parseMachines(process.env.FACTORY_MACHINES, process.env.FACTORY_SLOTS);
+
+// Every docker call goes through here. A call that hangs (a worker machine that sleeps) fails after the timeout.
+const CALL_TIMEOUT = 60_000;
+export async function dockerCall(machine: string, args: string[], opts: { env?: NodeJS.ProcessEnv; timeout?: number; maxBuffer?: number } = {}) {
+  const timeout = opts.timeout ?? CALL_TIMEOUT;
+  const env = { ...process.env, ...opts.env, ...(machine === LOCAL ? {} : { DOCKER_HOST: machine }) };
+  try {
+    return await exec("docker", args, { maxBuffer: 20 * 1024 * 1024, ...opts, env, timeout });
+  } catch (e) {
+    if ((e as { killed?: boolean }).killed) throw Object.assign(new Error(`docker ${args[0]} on ${machine} timed out after ${timeout} ms.`), { code: "TIMEOUT" });
+    throw e;
+  }
+}
+
 // Every run gets two volumes: /work (the clone) and /tmp (ticket.md, pr-body.md, evidence/, review files).
 // The course's .sandcastle scripts read and write fixed /tmp paths, so they run unchanged.
 const IMAGE = process.env.RUNNER_IMAGE ?? "factory-runner:latest";
@@ -28,12 +63,14 @@ export const volumes = (runId: string) => ["work", "tmp"].flatMap((v) => ["--mou
 const envFlags = (vars: Record<string, string>) => Object.keys(vars).flatMap((k) => ["-e", k]);
 
 /** Run a short script to completion in a fresh container on the run's volumes. Returns stdout. */
-export async function oneShot(runId: string, script: string, vars: Record<string, string> = {}): Promise<string> {
+// A clone plus project setup can take long. The limit only catches a call that hangs.
+const ONE_SHOT_TIMEOUT = 60 * 60_000;
+export async function oneShot(runId: string, script: string, vars: Record<string, string> = {}, machine = LOCAL): Promise<string> {
   try {
-    const { stdout } = await exec(
-      "docker",
+    const { stdout } = await dockerCall(
+      machine,
       ["run", "--rm", ...LIMITS, ...envFlags(vars), ...volumes(runId), "-w", "/work", IMAGE, "bash", "-euo", "pipefail", "-c", script],
-      { env: { ...process.env, ...vars }, maxBuffer: 20 * 1024 * 1024 },
+      { env: vars, timeout: ONE_SHOT_TIMEOUT },
     );
     return stdout;
   } catch (e) {
@@ -83,25 +120,25 @@ fi
 /** Start the agent in the background and return at once. */
 // One run can start several agents (implement-spec: decompose, notes, merges). `agent` names the container,
 // `runId` names the volumes they share.
-export async function startAgent(runId: string, script: string, vars: Record<string, string>, subject: string, agent = runId): Promise<void> {
+export async function startAgent(runId: string, script: string, vars: Record<string, string>, subject: string, agent = runId, machine = LOCAL): Promise<void> {
   // The labels let `sf` show which ticket or PR each running agent of its repo works on.
-  await exec(
-    "docker",
+  await dockerCall(
+    machine,
     ["run", "-d", "--name", `agent-${agent}`, "--label", `factory.subject=${subject}`, "--label", repoLabel(), ...LIMITS, ...envFlags(vars), ...volumes(runId), "-w", "/work/repo", IMAGE, "bash", "-c", activityHook + script],
-    { env: { ...process.env, ...vars } },
+    { env: vars },
   );
 }
 
 /** null while the agent runs, else its exit code. */
-export async function agentExitCode(agent: string): Promise<number | null> {
-  const { stdout } = await exec("docker", ["inspect", "-f", "{{.State.Status}} {{.State.ExitCode}}", `agent-${agent}`]);
+export async function agentExitCode(agent: string, machine = LOCAL): Promise<number | null> {
+  const { stdout } = await dockerCall(machine, ["inspect", "-f", "{{.State.Status}} {{.State.ExitCode}}", `agent-${agent}`]);
   const [status, code] = stdout.trim().split(" ");
   return status === "exited" || status === "dead" ? Number(code) : null;
 }
 
 /** The last lines an ended agent printed, without the activity lines. For the failure message: cleanup deletes the log. */
-export async function agentLogTail(agent: string): Promise<string> {
-  const { stdout, stderr } = await exec("docker", ["logs", "--tail", "60", `agent-${agent}`]).catch(() => ({ stdout: "", stderr: "" }));
+export async function agentLogTail(agent: string, machine = LOCAL): Promise<string> {
+  const { stdout, stderr } = await dockerCall(machine, ["logs", "--tail", "60", `agent-${agent}`]).catch(() => ({ stdout: "", stderr: "" }));
   return tailForMessage(stdout + stderr, [process.env.CLAUDE_CODE_OAUTH_TOKEN ?? ""]);
 }
 // The message goes into a GitHub comment, and the agent's container holds the model token: redact it.
@@ -110,23 +147,23 @@ export const tailForMessage = (log: string, secrets: string[] = []) =>
     .split("\n").filter((l) => l.trim() && !l.startsWith('{"sf":1')).slice(-8).join("\n").slice(-600).replaceAll("```", "~~~");
 
 /** True when this run's agent container exists, running or not. */
-export async function agentExists(agent: string): Promise<boolean> {
-  const { stdout } = await exec("docker", ["ps", "-aq", "--filter", `name=^agent-${agent}$`]);
+export async function agentExists(agent: string, machine = LOCAL): Promise<boolean> {
+  const { stdout } = await dockerCall(machine, ["ps", "-aq", "--filter", `name=^agent-${agent}$`]);
   return stdout.trim() !== "";
 }
 
-/** Number of agent containers running on this host, from every factory. The machine-slot count. */
-export async function runningAgents(): Promise<number> {
-  const { stdout } = await exec("docker", ["ps", "-q", "--filter", "name=^agent-"]);
+/** Number of agent containers running on one machine, from every factory. The machine-slot count. */
+export async function runningAgents(machine = LOCAL): Promise<number> {
+  const { stdout } = await dockerCall(machine, ["ps", "-q", "--filter", "name=^agent-"]);
   return stdout.split("\n").filter(Boolean).length;
 }
 
-export async function cleanup(runId: string): Promise<void> {
+export async function cleanup(runId: string, machine = LOCAL): Promise<void> {
   // Every agent of the run: agent-<runId> and agent-<runId>-<key>.
-  const { stdout } = await exec("docker", ["ps", "-aq", "--filter", `name=^agent-${runId}`]).catch(() => ({ stdout: "" }));
+  const { stdout } = await dockerCall(machine, ["ps", "-aq", "--filter", `name=^agent-${runId}`]).catch(() => ({ stdout: "" }));
   const ids = stdout.split("\n").filter(Boolean);
-  if (ids.length) await exec("docker", ["rm", "-f", ...ids]).catch(() => {});
-  await exec("docker", ["volume", "rm", "-f", `run-${runId}-work`, `run-${runId}-tmp`]).catch(() => {});
+  if (ids.length) await dockerCall(machine, ["rm", "-f", ...ids]).catch(() => {});
+  await dockerCall(machine, ["volume", "rm", "-f", `run-${runId}-work`, `run-${runId}-tmp`]).catch(() => {});
 }
 
 /** Model token plus optional OTLP trace export (Phoenix or self-hosted Langfuse). */
