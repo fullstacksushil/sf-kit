@@ -25,6 +25,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # rtk shortens the output of shell commands (git, npm, grep, ls) before the agent reads it, through a Claude Code
 # hook that orchestrator/src/docker.ts adds. The Apache-2.0 edition: the hook and the filters, no engine.
 # A new version: update the three values from the release's checksums.txt.
+# Checksums read on 2026-11-16 from https://github.com/rtk-ai/rtk/releases/download/v1.2.0/checksums.txt
 # The image's own architecture picks the download, so the image builds on amd64 (EC2) and arm64 (a Mac mini VM).
 ARG RTK_VERSION=1.2.0
 ARG RTK_SHA256_AMD64=a28407dc13038bdc9c2a1f5a047b0c636e0c1d495b15523576e2adb992a06a17

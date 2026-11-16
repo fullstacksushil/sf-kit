@@ -14,7 +14,6 @@ hasnt() { grep -qF -- "$1" <<<"$OUT" && { echo "FAIL: unexpected: $1"; FAIL=1; }
 run() { PATH="$T:$PATH" "$KIT/init-worker.sh" "$@" 2>&1; }
 
 OUT="$(run --key "$KEY" --dry-run)" || { echo "FAIL: exit $?"; echo "$OUT"; exit 1; }
-has "useradd --create-home --shell /bin/bash factory"
 has "usermod -aG docker factory"
 has "restrict $KEY"
 has "docker network create factory-net --subnet 172.30.0.0/24"
@@ -27,6 +26,7 @@ hasnt "CLAUDE_CODE_OAUTH_TOKEN"
 hasnt "+ sudo mkdir -p /etc/factory"
 
 OUT="$(run --key "$KEY" --user agentbox --dry-run)"
+# A user that exists on this test machine gets no useradd line, so the check uses an unlikely name.
 has "useradd --create-home --shell /bin/bash agentbox"
 has "ssh://agentbox@"
 

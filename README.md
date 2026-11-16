@@ -23,6 +23,7 @@ flowchart LR
 | `herdr-plugin/` | An optional [herdr](https://herdr.dev) plugin. It lets you pick a running agent and follow it in a herdr pane. |
 | `init-host.sh` | Prepares a VPS or laptop once. It installs Inngest, Postgres, Redis, optional Phoenix, the run network, firewall rules, the runner image and the template unit for the factories. It writes the shared env file and starts no factory. It never overwrites secrets. |
 | `setup-wizard.sh` | Run it after `init-host.sh`, once for each repo. Each run adds or edits one factory. It asks for the repo, the factory name, the GitHub token, the port, the firewall rule, the start, and webhook or polling. The first run also asks for the Claude token and optional Langfuse keys. It checks each value. |
+| `init-worker.sh` | Makes a machine a worker machine. A worker machine runs agent containers for a factory host and holds no factory config. The script adds a worker user that accepts the factory host's ssh key, the run network with the firewall rules, and the runner image. See [Worker machines](#worker-machines). |
 | `init-project.sh` | Makes a project ready for the factory. It adds the agent guide files, the tracker doc, the skills and the agent scripts. It never overwrites a file. |
 | `orchestrator/` | The Node app. It turns GitHub events into Inngest events. Its functions run the agent tasks in Docker. |
 | `host/` | The compose file, the runner Dockerfile, the Caddyfile, the firewall script with its unit `factory-firewall.service`, and the systemd template unit `factory-orchestrator@.service`. `init-host.sh` installs them, except the Caddyfile. The firewall unit adds the rules of the run network at each boot, and no factory starts without it. The Caddyfile has a webhook site and two dashboard sites behind basic auth. |
@@ -70,6 +71,16 @@ One factory host runs one factory for each repo. All factories share one Inngest
 `sf` finds the factory whose `GITHUB_REPO` matches the git origin of the folder. If no factory serves the repo, `sf` offers to run the wizard. Set `ENV_DIR` to read the env files from a folder other than `/etc/factory`. Set `SF_ORCHESTRATOR_URL` and `SF_FACTORY` to use a factory on another machine.
 
 After an update of the orchestrator code, restart every factory: `sudo systemctl restart 'factory-orchestrator@*'`.
+
+### Worker machines
+
+`FACTORY_MACHINES` in `common.env` lists the machines that run agents, with a slot count each: `local=2 ssh://factory@linux-box=3`. `local` is the factory host. Without `FACTORY_MACHINES`, the list is `local` with `FACTORY_SLOTS` slots. A bad list stops each factory at its start.
+
+Runs start only on `local` so far. To prepare a worker machine, run this on it as your own user. It refuses Docker Desktop, because the firewall rules cannot apply inside its VM.
+
+```bash
+./init-worker.sh --key "$(ssh <factory host> cat .ssh/id_ed25519.pub)" --dry-run
+```
 
 ### `sf` on another machine
 

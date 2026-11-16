@@ -2,7 +2,7 @@
 # Make this machine a worker machine: it runs agent containers for a factory host, and holds no factory config.
 # Sets up: a worker user that the factory host reaches over ssh, the run network with the factory firewall rules,
 # and the runner image. Run it on the worker machine, as your own user. It calls sudo for the steps that need it.
-# Safe to run again. Design: .scratch/multi-machine/spec.md in the workspace, and README.md in this folder.
+# Safe to run again. README.md in this folder, "Worker machines", explains the setup.
 set -euo pipefail
 
 KIT="$(cd "$(dirname "$0")" && pwd)"
@@ -55,7 +55,8 @@ say "Worker user $WORKER"
 id "$WORKER" >/dev/null 2>&1 || run sudo useradd --create-home --shell /bin/bash "$WORKER"
 # The docker group gives full control of Docker on this machine. That is the access the factory host needs.
 run sudo usermod -aG docker "$WORKER"
-# restrict: no port forwarding, no agent forwarding, no terminal. DOCKER_HOST=ssh:// needs none of them.
+# restrict: no port forwarding, no agent forwarding, no terminal.
+# check: DOCKER_HOST=ssh:// runs `docker system dial-stdio` over a plain ssh command, so it needs none of them. Not tested yet.
 line="restrict $KEY"
 home="$(getent passwd "$WORKER" | cut -d: -f6 || true)"; home="${home:-/home/$WORKER}"
 if [ "$DRY" = 1 ]; then

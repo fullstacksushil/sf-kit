@@ -12,13 +12,17 @@ export type Machine = { target: string; slots: number };
 // A host name, an optional port, and a user. The strict shape keeps ssh options (`-o...`) and shell text out.
 const SSH_TARGET = /^ssh:\/\/[A-Za-z0-9._][A-Za-z0-9._-]*@[A-Za-z0-9][A-Za-z0-9.-]*(:\d{1,5})?$/;
 export function parseMachines(list: string | undefined, slots: string | undefined): Machine[] {
-  if (list === undefined) return [{ target: LOCAL, slots: Number(slots ?? 2) }];
+  // An env file line `FACTORY_MACHINES=` gives an empty string. It means "not set", like a missing line.
+  if (!list?.trim()) {
+    if (!/^\d+$/.test(slots ?? "2")) throw new Error(`FACTORY_SLOTS: not a whole number: ${JSON.stringify(slots)}.`);
+    return [{ target: LOCAL, slots: Number(slots ?? 2) }];
+  }
   const bad = (why: string) => { throw new Error(`FACTORY_MACHINES: ${why}. Write it as "local=2 ssh://user@host=3".`); };
   const machines = list.split(/\s+/).filter(Boolean).map((entry) => {
-    const at = entry.lastIndexOf("="), target = entry.slice(0, at), n = entry.slice(at + 1);
-    if (at < 0 || !/^\d+$/.test(n)) bad(`no slot count in ${JSON.stringify(entry)}`);
+    const eq = entry.lastIndexOf("="), target = entry.slice(0, eq), slotCount = entry.slice(eq + 1);
+    if (eq < 0 || !/^\d+$/.test(slotCount)) bad(`no slot count in ${JSON.stringify(entry)}`);
     if (target !== LOCAL && !SSH_TARGET.test(target)) bad(`not local or ssh://user@host: ${JSON.stringify(target)}`);
-    return { target, slots: Number(n) };
+    return { target, slots: Number(slotCount) };
   });
   if (!machines.length) bad("the list is empty");
   if (new Set(machines.map((m) => m.target)).size !== machines.length) bad("a machine is listed twice");
@@ -28,13 +32,15 @@ export const MACHINES = parseMachines(process.env.FACTORY_MACHINES, process.env.
 
 // Every docker call goes through here. A call that hangs (a worker machine that sleeps) fails after the timeout.
 const CALL_TIMEOUT = 60_000;
-export async function dockerCall(machine: string, args: string[], opts: { env?: NodeJS.ProcessEnv; timeout?: number; maxBuffer?: number } = {}) {
+export async function dockerCall(machine: string, args: string[], opts: { env?: NodeJS.ProcessEnv; timeout?: number } = {}) {
   const timeout = opts.timeout ?? CALL_TIMEOUT;
   const env = { ...process.env, ...opts.env, ...(machine === LOCAL ? {} : { DOCKER_HOST: machine }) };
   try {
-    return await exec("docker", args, { maxBuffer: 20 * 1024 * 1024, ...opts, env, timeout });
+    return await exec("docker", args, { maxBuffer: 20 * 1024 * 1024, env, timeout });
   } catch (e) {
-    if ((e as { killed?: boolean }).killed) throw Object.assign(new Error(`docker ${args[0]} on ${machine} timed out after ${timeout} ms.`), { code: "TIMEOUT" });
+    // Node also kills the child when the output passes maxBuffer. Only a kill without that code is the timeout.
+    const { killed, code } = e as { killed?: boolean; code?: unknown };
+    if (killed && code !== "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") throw Object.assign(new Error(`docker ${args[0]} on ${machine} timed out after ${timeout} ms.`), { code: "TIMEOUT" });
     throw e;
   }
 }
@@ -74,6 +80,9 @@ export async function oneShot(runId: string, script: string, vars: Record<string
     );
     return stdout;
   } catch (e) {
+    // ponytail: the timeout kills the docker client, not the container, which runs on until the run's cleanup.
+    // The sweep of stale containers on each machine (multi-machine ticket 04) also catches it.
+    if ((e as { code?: unknown }).code === "TIMEOUT") throw e; // its message already says what hung
     // Node's message holds the whole docker command and script. The failure reasons the scripts print are
     // what a person needs on GitHub, so the error carries the output tail. `code` stays for callers that test it.
     const { stdout = "", stderr = "", code } = e as { stdout?: string; stderr?: string; code?: number };

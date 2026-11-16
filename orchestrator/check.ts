@@ -226,12 +226,18 @@ console.log("activity hook checks ok");
   const { parseMachines } = await import("./src/docker.ts");
   assert.deepEqual(parseMachines(undefined, "3"), [{ target: "local", slots: 3 }]);
   assert.deepEqual(parseMachines(undefined, undefined), [{ target: "local", slots: 2 }]);
+  assert.deepEqual(parseMachines(" ", "3"), [{ target: "local", slots: 3 }], "an empty FACTORY_MACHINES= line means not set");
+  assert.throws(() => parseMachines(undefined, "abc"), /FACTORY_SLOTS/);
   assert.deepEqual(parseMachines(" local=2  ssh://factory@linux-box=3 ssh://f@mac-mini.tail1.ts.net:2222=0 ", "9"),
     [{ target: "local", slots: 2 }, { target: "ssh://factory@linux-box", slots: 3 }, { target: "ssh://f@mac-mini.tail1.ts.net:2222", slots: 0 }]);
-  for (const bad of ["local", "local=", "local=x", "local=-1", "local=1.5", "http://h=2", "ssh://h=1", "ssh://u@h;id=1", "ssh://-oProxyCommand=x@h=1", "local=1 local=2", ""])
+  for (const bad of ["local", "local=", "local=x", "local=-1", "local=1.5", "http://h=2", "ssh://h=1", "ssh://u@h;id=1", "ssh://-oProxyCommand=x@h=1", "local=1 local=2", "abc", "x=1 y"])
     assert.throws(() => parseMachines(bad, "2"), /FACTORY_MACHINES/, JSON.stringify(bad));
   process.env.FACTORY_MACHINES = "local=1 ssh://u@h;id=1";
   await assert.rejects(import("./src/docker.ts?badmachines"), /FACTORY_MACHINES/, "a bad list stops the orchestrator at start");
+  process.env.FACTORY_MACHINES = "ssh://u@h=2";
+  // A fresh process: run.ts reads MACHINES from docker.ts, which this process already loaded.
+  const noLocal = spawnSync(process.execPath, ["--import", "tsx", "src/run.ts"], { env: { ...process.env }, encoding: "utf8", timeout: 20000 });
+  assert.ok(noLocal.status !== 0 && /list local/.test(noLocal.stderr), "runs start only on local so far");
   delete process.env.FACTORY_MACHINES;
 }
 { // Every docker call goes to its machine: DOCKER_HOST for a remote one, the process env for local. Every call has a timeout.

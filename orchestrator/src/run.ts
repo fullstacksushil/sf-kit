@@ -17,8 +17,9 @@ export const PRIVATE_DEPS = (process.env.RUN_PRIVATE_DEPS ?? "").split(/\s+/).fi
   return d;
 });
 const MAX_MINUTES = Number(process.env.RUN_MAX_MINUTES ?? 45);
-// The factory host's own slots, from FACTORY_MACHINES (or FACTORY_SLOTS without it). Worker machines get runs in a later step.
-export const SLOTS = docker.MACHINES.find((m) => m.target === docker.LOCAL)?.slots ?? 0;
+// The factory host's own slots, from FACTORY_MACHINES (or FACTORY_SLOTS without it). Runs start only on local so far.
+export const SLOTS = docker.MACHINES.find((m) => m.target === docker.LOCAL)?.slots
+  ?? (() => { throw new Error("FACTORY_MACHINES: list local, for example local=2. Runs start only on local so far."); })();
 
 /** The parts of Inngest's step tools that a run uses. */
 export type Step = {
@@ -301,7 +302,7 @@ export async function runAgent(step: Step, runId: string, prepare: string | null
       return true;
     }).catch((e) => { if (e instanceof LockTimeout) return false; throw e; }))) as boolean;
     if (started) break;
-    if (i >= 120) throw new Error(`No free machine slot for 2 hours (FACTORY_SLOTS=${SLOTS}).`);
+    if (i >= 120) throw new Error(`No free machine slot for 2 hours (${SLOTS} slots on local, from FACTORY_MACHINES or FACTORY_SLOTS).`);
     await step.sleep(id(`wait-slot-${i}`), "1m");
   }
 
