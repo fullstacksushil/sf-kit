@@ -59,7 +59,11 @@ const call = ",id:.tool_use_id,tool:.tool_name";
 // `in`: the most useful single value of the input as plain text, else the input as JSON. Cut to 80 characters.
 const input = "(.tool_input as $i | (($i | objects | .command // .file_path // .pattern // .url // .description) // ($i | tostring)) | tostring | .[0:80])";
 const activitySettings = JSON.stringify({ hooks: {
-  PreToolUse: [{ matcher: "*", ...hook(`${call},in:${input}`) }],
+  PreToolUse: [
+    { matcher: "*", ...hook(`${call},in:${input}`) },
+    // rtk (in the runner image) rewrites a Bash command to its shorter-output form. An image without rtk skips it.
+    { matcher: "Bash", hooks: [{ type: "command", command: "if command -v rtk >/dev/null; then rtk hook claude; fi" }] },
+  ],
   PostToolUse: [{ matcher: "*", ...hook(`${call},ms:.duration_ms`) }],
   // `err`: the start of the error text, so `sf logs` can say why a call failed.
   PostToolUseFailure: [{ matcher: "*", ...hook(`${call},ms:.duration_ms,err:((.error // "") | tostring | .[0:120])`) }],

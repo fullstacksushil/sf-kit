@@ -199,6 +199,11 @@ console.log("multi-factory checks ok");
     assert.equal(spawnSync("sh", ["-c", cmd.replace("/proc/1/fd/1", `${dir}/no/such/dir/out`)], { input: '{"hook_event_name":"Stop"}', encoding: "utf8" }).status, 0, `${ev} with an unwritable target`);
   }
   assert.equal(fire("Stop", { ...base, hook_event_name: "Stop", last_assistant_message: "done" }), `{"sf":1,"t":"T","ev":"Stop"}\n`);
+  // The rtk hook, Bash only. In an image without rtk it does nothing: exit 0, no output, the command unchanged.
+  const rtkHook = hooks.PreToolUse[1];
+  assert.equal(rtkHook.matcher, "Bash");
+  const noRtk = spawnSync("sh", ["-c", rtkHook.hooks[0].command], { input: JSON.stringify({ tool_input: cmdIn }), env: { PATH: "/usr/bin:/bin" }, encoding: "utf8" });
+  assert.deepEqual([noRtk.status, noRtk.stdout], [0, ""]);
   // An existing user settings file stays as it was. The agent still runs.
   const home2 = `${dir}/home2`;
   mkdirSync(`${home2}/.claude`, { recursive: true });
