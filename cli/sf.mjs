@@ -23,8 +23,17 @@ import readline from "node:readline";
 
 const KIT = new URL("..", import.meta.url).pathname;
 const SF = ".sf", STATE = `${SF}/state.json`;
-const INNGEST = process.env.INNGEST_BASE_URL ?? "http://127.0.0.1:8288";
-const ENV_DIR = process.env.ENV_DIR ?? "/etc/factory";
+// The env files of the factory host. A machine that is not the factory host has its own copy in ~/.config/sf,
+// with the addresses of the host in it. That folder wins over /etc/factory.
+const USER_ENV_DIR = `${process.env.XDG_CONFIG_HOME ?? `${process.env.HOME}/.config`}/sf`;
+const ENV_DIR = process.env.ENV_DIR ?? (fs.existsSync(`${USER_ENV_DIR}/factories`) ? USER_ENV_DIR : "/etc/factory");
+const envValue = (file, key) => { try { return fs.readFileSync(file, "utf8").match(new RegExp(`^${key}=['"]?([^'"\\n]+)`, "m"))?.[1]; } catch { return undefined; } };
+// The Inngest URL may hold a user and a password, for a dashboard behind basic auth: https://user:password@host.
+// fetch refuses such a URL, so the two go into a header. INNGEST is the URL without them, safe to print.
+const inngestUrl = new URL(process.env.INNGEST_BASE_URL ?? envValue(`${ENV_DIR}/common.env`, "INNGEST_BASE_URL") ?? "http://127.0.0.1:8288");
+const INNGEST_AUTH = inngestUrl.username ? { authorization: `Basic ${Buffer.from(`${decodeURIComponent(inngestUrl.username)}:${decodeURIComponent(inngestUrl.password)}`).toString("base64")}` } : {};
+inngestUrl.username = inngestUrl.password = "";
+const INNGEST = inngestUrl.href.replace(/\/$/, "");
 const c = { b: (s) => `\x1b[1m${s}\x1b[0m`, d: (s) => `\x1b[2m${s}\x1b[0m`, g: (s) => `\x1b[32m${s}\x1b[0m`, y: (s) => `\x1b[33m${s}\x1b[0m`, r: (s) => `\x1b[31m${s}\x1b[0m`, c: (s) => `\x1b[36m${s}\x1b[0m` };
 
 // ── shell, gh, state ──────────────────────────────────────────────────────
@@ -323,7 +332,7 @@ function followActivity(name) {
 // check: read on this host on 2026-11-13 from the live self-hosted Inngest, not from docs: POST /v0/gql with no key,
 // `apps { id externalID }`, the `runs` filter (from: Time!, appIDs: [UUID!], status), `run(runID:) { trace }` and
 // `runTrigger(runID:) { payloads }` (a list of JSON event strings).
-const gql = (query, signal, variables = {}) => fetch(`${INNGEST}/v0/gql`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ query, variables }), signal })
+const gql = (query, signal, variables = {}) => fetch(`${INNGEST}/v0/gql`, { method: "POST", headers: { "content-type": "application/json", ...INNGEST_AUTH }, body: JSON.stringify({ query, variables }), signal })
   .then((r) => r.json()).then((j) => j.data ?? Promise.reject(new Error("no data")));
 const DONE = new Set(["COMPLETED", "FAILED", "CANCELLED", "SKIPPED"]);
 /** The RUNNING and QUEUED runs, or a string that says why there are none to show. undefined: no block. */
@@ -354,7 +363,6 @@ async function runs() {
 }
 
 // The factory that serves this repo: its env file in $ENV_DIR/factories has GITHUB_REPO = origin. Name = file name.
-const envValue = (file, key) => { try { return fs.readFileSync(file, "utf8").match(new RegExp(`^${key}=['"]?([^'"\\n]+)`, "m"))?.[1]; } catch { return undefined; } };
 /** The env file name of the factory that serves this repo, or undefined. Never stops sf. */
 function factoryFile() {
   let files = []; try { files = fs.readdirSync(`${ENV_DIR}/factories`).filter((f) => f.endsWith(".env")).sort(); } catch {}
@@ -363,8 +371,10 @@ function factoryFile() {
 function findFactory() {
   const f = factoryFile();
   if (!f) return undefined;
-  const file = `${ENV_DIR}/factories/${f}`, port = envValue(file, "PORT") ?? die(`No PORT in ${file}. Add the factory's port, for example PORT=3001.`);
-  return { name: f.slice(0, -4), url: `http://127.0.0.1:${port}` };
+  // ORCHESTRATOR_URL: the factory runs on another machine. Else it listens on PORT of this machine.
+  const file = `${ENV_DIR}/factories/${f}`, remote = envValue(file, "ORCHESTRATOR_URL");
+  const port = remote ? "" : envValue(file, "PORT") ?? die(`No PORT in ${file}. Add the factory's port, for example PORT=3001.`);
+  return { name: f.slice(0, -4), url: remote ?? `http://127.0.0.1:${port}` };
 }
 let FACTORY;
 async function factory() {
@@ -808,7 +818,7 @@ async function sendEvent(event, what) {
   const key = process.env.INNGEST_EVENT_KEY ?? envValue(`${ENV_DIR}/common.env`, "INNGEST_EVENT_KEY");
   const name = eventName((await factory()).name, event);
   if (!key) die("No INNGEST_EVENT_KEY. Set it in your env, or run sf on the factory host.");
-  const r = await fetch(`${INNGEST}/e/${key}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name, data: {} }) })
+  const r = await fetch(`${INNGEST}/e/${key}`, { method: "POST", headers: { "content-type": "application/json", ...INNGEST_AUTH }, body: JSON.stringify({ name, data: {} }) })
     .catch((e) => die(`Inngest at ${INNGEST} did not answer (${e.cause?.code ?? e.message}). Is the factory running?`));
   console.log(r.ok ? c.g(`${what} requested. Watch it in the Inngest dashboard.`) : c.r(`Inngest answered ${r.status}.`));
 }

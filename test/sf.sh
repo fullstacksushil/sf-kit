@@ -25,7 +25,7 @@ import http from "node:http"; import fs from "node:fs";
 // /v0/gql answers from $T/gql/apps, $T/gql/runs and $T/gql/run-<id>. A missing file is a GraphQL error, as Inngest gives for an unknown run.
 const gql = (b) => { const j = JSON.parse(b), qs = j.query, k = /^\{\s*apps/.test(qs) ? "apps" : /runs\(/.test(qs) ? "runs" : `run-${j.variables?.id}`;
   try { return fs.readFileSync(`${process.argv[4]}/gql/${k}`, "utf8"); } catch { return '{"errors":[{"message":"no rows"}],"data":null}'; } };
-http.createServer((q, r) => { let b = ""; q.on("data", (d) => b += d); q.on("end", () => { fs.appendFileSync(process.argv[2], `${q.url} ${b}\n`); r.end(q.url === "/v0/gql" ? gql(b) : "ok"); }); }).listen(0, "127.0.0.1", function () { fs.writeFileSync(process.argv[3], String(this.address().port)); });
+http.createServer((q, r) => { let b = ""; q.on("data", (d) => b += d); q.on("end", () => { fs.appendFileSync(process.argv[2], `${q.url} ${b}\n`); if (q.headers.authorization) fs.appendFileSync(`${process.argv[4]}/auth.log`, `${q.headers.authorization}\n`); r.end(q.url === "/v0/gql" ? gql(b) : "ok"); }); }).listen(0, "127.0.0.1", function () { fs.writeFileSync(process.argv[3], String(this.address().port)); });
 S
 export T="$T" T_LOG="$T/docker.log" T_WIZ="$T/wiz.args" ENV_DIR="$T/env" SF_WIZARD="$T/bin/wiz" HOME="$T/home" XDG_STATE_HOME="$T/state"
 node "$T/srv.mjs" "$T/events.log" "$T/port" "$T" & SRV=$!
@@ -293,6 +293,18 @@ echo '{"data":{"apps":[{"id":"u-x","externalID":"software-factory-other"}]}}' > 
 ok "runs: app not found, one line" '(cd "$T/repo" && "$SF" 2>&1 </dev/null) | grep -q "Runs: Inngest has no app software-factory-repo-a"'
 ok "runs: remote factory without an Inngest URL, no block" '! (cd "$T/repo" && env -u INNGEST_BASE_URL SF_ORCHESTRATOR_URL=http://127.0.0.1:1 SF_FACTORY=repo-a "$SF" 2>&1 </dev/null) | grep -q "Runs"'
 ok "runs: remote factory with an Inngest URL, block shown" '(cd "$T/repo" && SF_ORCHESTRATOR_URL=http://127.0.0.1:1 SF_FACTORY=repo-a "$SF" 2>&1 </dev/null) | grep -q "Runs: Inngest has no app software-factory-repo-a"'
+# A machine that is not the factory host: its env folder names the host. Password "p/w" is percent-encoded in the URL.
+mkdir -p "$T/remote/factories"; printf 'GITHUB_REPO=Owner/Repo\nORCHESTRATOR_URL=http://127.0.0.1:1\n' > "$T/remote/factories/repo-a.env"
+printf "INNGEST_BASE_URL='http://op:p%%2Fw@127.0.0.1:$(cat "$T/port")'\nINNGEST_EVENT_KEY='k9'\n" > "$T/remote/common.env"
+rboard=$(cd "$T/repo" && env -u INNGEST_BASE_URL ENV_DIR="$T/remote" "$SF" 2>&1 </dev/null)
+ok "remote: runs block from the URL in common.env, no PORT needed" 'grep -q "Runs: Inngest has no app software-factory-repo-a" <<<"$rboard"'
+ok "remote: user and password go as a basic auth header" 'grep -qx "Basic b3A6cC93" "$T/auth.log"'
+ok "remote: the password is never printed" '! grep -q "p%2Fw\|p/w\|op:" <<<"$rboard" && grep -q "Inngest http://127.0.0.1:" <<<"$rboard"'
+(cd "$T/repo" && env -u INNGEST_BASE_URL ENV_DIR="$T/remote" "$SF" ratchet >/dev/null 2>&1 </dev/null)
+ok "remote: a manual event goes to the host with its key" 'grep -q "^/e/k9 .*factory/repo-a/ratchet.requested" "$T/events.log"'
+mkdir -p "$T/home/.config/sf/factories"; cp "$T/remote/common.env" "$T/home/.config/sf/"; cp "$T/remote/factories/repo-a.env" "$T/home/.config/sf/factories/"
+ok "remote: ~/.config/sf wins over /etc/factory when ENV_DIR is not set" '(cd "$T/repo" && env -u INNGEST_BASE_URL -u ENV_DIR -u XDG_CONFIG_HOME "$SF" 2>&1 </dev/null) | grep -q "Runs: Inngest has no app software-factory-repo-a"'
+rm -rf "$T/home/.config/sf"
 git remote set-url origin git@github.com:owner/nofactory.git
 out=$(cd "$T/repo" && "$SF" 2>&1 </dev/null); rc=$?
 ok "runs: no factory, one line, no undefined" '[ $rc -eq 0 ] && grep -q "Runs: no factory found for this repo" <<<"$out" && ! grep -q undefined <<<"$out" && grep -q "Agents" <<<"$out"'

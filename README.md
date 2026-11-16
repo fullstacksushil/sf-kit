@@ -25,7 +25,7 @@ flowchart LR
 | `setup-wizard.sh` | Run it after `init-host.sh`, once for each repo. Each run adds or edits one factory. It asks for the repo, the factory name, the GitHub token, the port, the firewall rule, the start, and webhook or polling. The first run also asks for the Claude token and optional Langfuse keys. It checks each value. |
 | `init-project.sh` | Makes a project ready for the factory. It adds the agent guide files, the tracker doc, the skills and the agent scripts. It never overwrites a file. |
 | `orchestrator/` | The Node app. It turns GitHub events into Inngest events. Its functions run the agent tasks in Docker. |
-| `host/` | The compose file, the runner Dockerfile, the Caddyfile and the systemd template unit `factory-orchestrator@.service`. `init-host.sh` installs them. |
+| `host/` | The compose file, the runner Dockerfile, the Caddyfile, the firewall script with its unit `factory-firewall.service`, and the systemd template unit `factory-orchestrator@.service`. `init-host.sh` installs them, except the Caddyfile. The firewall unit adds the rules of the run network at each boot, and no factory starts without it. The Caddyfile has a webhook site and two dashboard sites behind basic auth. |
 | `project-template/` | The files `init-project.sh` copies: `AGENTS.md`, `GLOSSARY.md`, `CODING_STANDARDS.md`, the tracker doc, the PR template, the pre-commit hook (`.githooks/pre-commit`, with `scripts/check-file-tokens.mjs`) and a CI workflow (`.github/workflows/check.yml`). `npm install` turns the hook on, in your clone and in each agent's clone. The hook runs `npm run check:fast` when the project has it, else `npm run check`. CI runs the full check. Keep `check:fast` to a few seconds, because agents commit often. |
 
 ## Install
@@ -70,6 +70,15 @@ One factory host runs one factory for each repo. All factories share one Inngest
 `sf` finds the factory whose `GITHUB_REPO` matches the git origin of the folder. If no factory serves the repo, `sf` offers to run the wizard. Set `ENV_DIR` to read the env files from a folder other than `/etc/factory`. Set `SF_ORCHESTRATOR_URL` and `SF_FACTORY` to use a factory on another machine.
 
 After an update of the orchestrator code, restart every factory: `sudo systemctl restart 'factory-orchestrator@*'`.
+
+### `sf` on another machine
+
+`sf` can run on a machine that is not the factory host. Make the folder `~/.config/sf` on that machine. `sf` reads this folder before `/etc/factory`.
+
+- `factories/<name>.env`: `GITHUB_REPO`, and `ORCHESTRATOR_URL` with the public address of the host. It needs no `PORT`.
+- `common.env`: `INNGEST_BASE_URL` and `INNGEST_EVENT_KEY` of the host. For an Inngest dashboard behind basic auth, put the user and the password in the URL: `https://<user>:<password>@<host>`. Percent-encode the password. `sf` sends them as a header and never prints them.
+
+Give the files mode 600. The board then shows the runs of the host. It shows no agents, and `sf logs` finds none, because both read the Docker of the local machine.
 
 ## The `sf` pipeline
 
@@ -217,7 +226,7 @@ flowchart LR
     agent -- "commits and files<br/>(data only)" --> token
 ```
 
-- **No agent holds the token.** Every agent runs in a fresh container with no GitHub token and no Linux capabilities (`--cap-drop ALL`). The firewall blocks the private ranges, so agents cannot reach your LAN. It also blocks 100.64.0.0/10, the range Tailscale uses.
+- **No agent holds the token.** Every agent runs in a fresh container with no GitHub token and no Linux capabilities (`--cap-drop ALL`). The firewall blocks the private ranges, so agents cannot reach your LAN. It also blocks 100.64.0.0/10, the range Tailscale uses, and 169.254.0.0/16, which holds the metadata address of a cloud machine. `factory-firewall.service` adds the rules again at each boot.
 - **Token steps run no project code.** They never run git inside the agent's repo. A push copies the commits into a fresh bare repo and pushes from there, so hooks and config the agent wrote do not run.
 - **Agent files are data.** A token step reads an agent's file only if it is a plain file under `/tmp`. It refuses symlinks.
 - **Workflows stay with people.** The factory refuses to push commits that change `.github/workflows` or `.github/actions`. A pushed workflow runs with the repo's Actions secrets. The push step checks this against branches it reads from GitHub, not against the agent's repo. One exception: a rebase keeps a PR's own workflow changes when git merges them with no conflict. The factory refuses an agent's fix of a conflict in a workflow file.
@@ -231,10 +240,21 @@ flowchart LR
 
 The orchestrator gets GitHub events from a webhook, or it polls GitHub.
 
-- **Webhook:** GitHub calls the orchestrator at once. It needs a public URL.
+- **Webhook:** GitHub calls the orchestrator at once. It needs a public URL. With several factories on one host, each factory gets its own path, `/webhooks/<factory name>`. `host/Caddyfile` maps each path to the port of its factory.
 - **Polling:** set `GITHUB_POLL=1` in the factory env file, `/etc/factory/factories/<name>.env`. A cron function checks the trigger labels and new prototype feedback once a minute. Use it on a laptop with no public URL.
 
-Polling is up to a minute slower. It makes one API call per trigger label a minute, and one per open prototype issue. The token allows 5,000 calls an hour. Duplicate events are safe, because each task removes its trigger label at the start and skips repeats.
+You can use both. The webhook starts each run at once, and polling finds a label that GitHub delivered while the host was down. Polling is up to a minute slower. It makes one API call per trigger label a minute, and one per open prototype issue. The token allows 5,000 calls an hour. Duplicate events are safe, because each task removes its trigger label at the start and skips repeats. The webhook stage of the wizard sets `GITHUB_POLL=0`. To use both, set `GITHUB_POLL=1` again and restart the factory.
+
+## Dashboards
+
+The Inngest and Phoenix dashboards listen on localhost only. You can reach them from another machine in two ways.
+
+- **SSH tunnel:** `ssh -L 8288:localhost:8288 -L 6006:localhost:6006 <you>@<host>`. No port opens.
+- **Caddy with basic auth:** `host/Caddyfile` has one site for each dashboard. Each site needs a DNS name that points to the host, and ports 80 and 443 must be open. Make the password hash with `caddy hash-password`.
+
+The Inngest dashboard has no sign-in of its own. A person who passes the basic auth prompt can start and cancel runs. Phoenix asks for its own sign-in after the prompt.
+
+Tested on 2026-11-16 with Caddy 2.11 and Chrome: Inngest answers 401 on `/dev`, a path that its dashboard reads. The browser then discarded the password and showed the prompt again, with no end. The Inngest site in `host/Caddyfile` changes these 401 answers to 403.
 
 ## Requirements
 
@@ -255,6 +275,8 @@ Polling is up to a minute slower. It makes one API call per trigger label a minu
 - Explore reads at most 100 labelled issues in one run. The rest keep `agent:explore` and wait for the next run.
 - All factories share the run network `factory-net`. An agent of one factory can reach a server that an agent of another factory started. Give each factory its own `RUNNER_NETWORK` before a factory serves a public repo.
 - `FACTORY_SLOTS` is one cap for the whole host, with no fair share. One factory can hold every slot. A run waits up to 2 hours for a slot.
+- A run container gets 4 CPUs and 8 GB of memory. Set `RUNNER_CPUS` and `RUNNER_MEMORY` in a factory env file to change the limits of that factory. Nothing checks that `FACTORY_SLOTS` runs fit in the memory of the host. When a run passes its limit, the kernel stops one process in the container, and the run fails with an unclear message.
+- To find the memory that a project needs, run its setup and its check in the runner image with `--memory <limit> --memory-swap <limit>`. The check must pass, and `/sys/fs/cgroup/memory.events` in the container must show `oom_kill 0`. Do not read `memory.peak` for this: it includes the file cache, and the file cache fills the limit.
 - The prototype task posts screenshots and a draft PR. It does not deploy a preview you can click. To try it, check out the PR and follow `prototypes/issue-<n>/README.md`.
 - `init-project.sh` adds the `prototype-needed` verdict only to explore files it creates. In an existing copy, add it to the enum in `.sandcastle/agent-workflows/explore/plan-schema.ts` yourself.
 - The bundled `decompose-prompt.md` names the files and tables of the sample app it came from. Rewrite it for your project before the night shift writes tickets for you.
