@@ -16,7 +16,7 @@ export const PRIVATE_DEPS = (process.env.RUN_PRIVATE_DEPS ?? "").split(/\s+/).fi
   if (!/^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/.test(d) || d.includes("..")) throw new Error(`RUN_PRIVATE_DEPS: not owner/repo: ${JSON.stringify(d)}`);
   return d;
 });
-const MAX_MINUTES = Number(process.env.RUN_MAX_MINUTES ?? 45);
+const { MAX_MINUTES } = docker;
 // The slots of every machine together: how many agents can run at once.
 export const TOTAL_SLOTS = docker.MACHINES.reduce((n, m) => n + m.slots, 0);
 
@@ -277,6 +277,41 @@ function slotLock<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 /**
+ * Sweep the machines that answer again: remove what ended runs left there. Runs beside a run, never fails it.
+ * `runId` is a run that is surely active. If Inngest does not list it, the run ids do not match and nothing is swept.
+ */
+async function sweepReady(runId: string): Promise<void> {
+  const ready = docker.takeReadyToSweep();
+  if (!ready.length) return;
+  const active = await activeRunIds().catch((e: Error) => { console.warn(`no sweep: ${e.message}`); return undefined; });
+  if (!active?.has(runId)) {
+    if (active) console.warn(`no sweep: Inngest does not list the active run ${runId}, so its run ids cannot be trusted.`);
+    return ready.forEach(docker.sweepLater);
+  }
+  for (const m of ready) {
+    await docker.sweep(m, active).then(
+      (gone) => { if (gone.length) console.log(`sweep of ${m}: removed ${gone.join(" ")}`); },
+      (e: Error) => { console.warn(`sweep of ${m}: ${e.message.split("\n")[0]}`); docker.sweepLater(m); });
+  }
+}
+
+/** The ids of every run that Inngest runs or queues, from every factory on this Inngest server. */
+// check: the GraphQL shape was read from the live self-hosted Inngest on 2026-11-13 (see cli/sf.mjs): POST /v0/gql with no key,
+// runs(first, orderBy, filter: {from, status}). Not tested: the filter without appIDs, and first: 500.
+// sweepReady checks that the list holds the calling run, so a wrong id shape sweeps nothing.
+async function activeRunIds(): Promise<Set<string>> {
+  const from = new Date(Date.now() - 365 * 86_400_000).toISOString();
+  const query = `query($from: Time!) { runs(first: 500, orderBy: [{field: QUEUED_AT, direction: DESC}], filter: {from: $from, status: [RUNNING, QUEUED]}) { edges { node { id } } } }`;
+  const r = await fetch(`${process.env.INNGEST_BASE_URL ?? "http://127.0.0.1:8288"}/v0/gql`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ query, variables: { from } }), signal: AbortSignal.timeout(10_000),
+  });
+  const edges = ((await r.json()) as { data?: { runs?: { edges?: { node: { id: string } }[] } } }).data?.runs?.edges;
+  if (!Array.isArray(edges)) throw new Error("Inngest gave no run list.");
+  if (edges.length >= 500) throw new Error("Inngest lists 500 or more active runs, so the list may be cut.");
+  return new Set(edges.map((e) => e.node.id));
+}
+
+/**
  * Pick the run's machine and create its volumes there. The first step of each function that runs containers,
  * inside the try whose finally cleans up, so the volumes never outlive the run.
  * The pick never waits for a free slot: the start of the agent does. It waits only when no machine has any slots.
@@ -286,7 +321,7 @@ export async function placeRun(step: Step, runId: string): Promise<void> {
     const machine = (await step.run(`place-${i}`, () => slotLock(() => docker.place(runId))
       .catch((e) => { if (e instanceof LockTimeout) return null; throw e; }))) as string | null;
     // On a replay this is the stored result. Every later step of this invocation uses it.
-    if (machine) return docker.remember(runId, machine);
+    if (machine) { docker.remember(runId, machine); void sweepReady(runId); return; }
     if (i >= 120) throw new Error("No machine had a slot for 2 hours. Check the slot counts in FACTORY_MACHINES.");
     await step.sleep(`wait-place-${i}`, "1m");
   }

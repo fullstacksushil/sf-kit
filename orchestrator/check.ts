@@ -262,21 +262,30 @@ console.log("activity hook checks ok");
   } finally { process.env.PATH = path; }
 }
 { // Placement: a run's volumes live on one machine and record where the run is. Every call of the run goes there.
-  const { place, findRun, oneShot, cleanup, startIfFree, agentExitCode, failureNote, remember } = await import("./src/docker.ts");
-  const { writeFileSync, chmodSync, readdirSync: ls, rmSync } = await import("node:fs");
+  const { place, findRun, oneShot, cleanup, startIfFree, agentExitCode, failureNote, remember, sweep, takeReadyToSweep } = await import("./src/docker.ts");
+  const { writeFileSync, chmodSync, readdirSync: ls, rmSync, mkdirSync } = await import("node:fs");
   const dir = mkdtempSync(`${tmpdir()}/sf-place-`);
-  // A fake docker with state per DOCKER_HOST: volumes and agent containers are files.
+  // A fake docker with state per DOCKER_HOST. A volume or container is a file that holds "<run> <created> <name>".
+  // A machine named *down*, or one with a file in off/, does not answer.
   writeFileSync(`${dir}/docker`, `#!/bin/sh
-case "\${DOCKER_HOST:-}" in *down*) echo "ssh: connect to host down: No route to host" >&2; exit 255 ;; esac
 h=$(printf %s "\${DOCKER_HOST:-local}" | tr -c 'A-Za-z0-9' _); d="${dir}/m/$h"; mkdir -p "$d/vol" "$d/agents"
+case "\${DOCKER_HOST:-}" in *down*) echo "ssh: connect to host down: No route to host" >&2; exit 255 ;; esac
+[ -e "${dir}/off/$h" ] && { echo "error during connect: ssh: connect to host: Connection timed out" >&2; exit 255; }
 echo "\${DOCKER_HOST:-local} $*" | tr "\\n" " " >> "${dir}/log"; echo >> "${dir}/log"
+labels() { run=-; at=0; while [ $# -gt 0 ]; do case "$1" in --label) case "$2" in factory.run=*) run="\${2#factory.run=}" ;; factory.created=*) at="\${2#factory.created=}" ;; esac ;; esac; shift; done; }
 case "$1 $2" in
-  "volume create") for a in "$@"; do last="$a"; done; touch "$d/vol/$last" ;;
-  "volume ls") ls "$d/vol" ;;
+  "volume create") for a in "$@"; do last="$a"; done; labels "$@"; echo "$run $at $last" > "$d/vol/$last" ;;
+  "volume ls") case "$*" in *factory.run*) cat "$d"/vol/* 2>/dev/null ;; *) ls "$d/vol" ;; esac ;;
   "volume rm") shift 3; for v in "$@"; do rm -f "$d/vol/$v"; done ;;
   "ps -q") ls "$d/agents" ;;
-  "run -d") touch "$d/agents/$4" ;;
-  "inspect -f") echo "exited 0" ;;
+  "ps -a") cat "$d"/agents/* 2>/dev/null | grep -v '^- ' ;;
+  "ps -aq") case "$4" in
+      label=factory.run=*) id="\${4#label=factory.run=}"; for f in "$d"/agents/*; do [ -e "$f" ] && read -r run at n < "$f" && [ "$run" = "$id" ] && echo "$n"; done ;;
+      name=*) n="\${4#name=^}"; n="\${n%$}"; for f in "$d"/agents/"$n"*; do [ -e "$f" ] && basename "$f"; done ;;
+    esac ;;
+  "rm -f") shift 2; for c in "$@"; do rm -f "$d/agents/$c"; done ;;
+  "run -d") labels "$@"; echo "$run $at $4" > "$d/agents/$4" ;;
+  "inspect -f") case "$4" in *gone*) echo "Error: No such object: $4" >&2; exit 1 ;; esac; echo "exited 0" ;;
 esac
 exit 0
 `);
@@ -339,6 +348,44 @@ exit 0
     for (const a of ls(`${dir}/m/ssh___f_b/agents`)) rmSync(`${dir}/m/ssh___f_b/agents/${a}`);
     assert.equal(await startIfFree("r5", "true", "issue #5", "r5", drained), true, "its run finishes there");
     assert.equal(await startIfFree("r1", "true", "issue #1", "r1", drained), false, "one agent at a time");
+
+    // The exit check: a lost connection means "still running". A real docker error still fails the step.
+    assert.equal(await agentExitCode("r6", "r6"), null, "the machine of r6 does not answer");
+    remember("rg", "ssh://f@b");
+    await assert.rejects(agentExitCode("rg", "gone"), /No such object/);
+    // The agent stops itself after the maximum run time, also when no one checks it any more.
+    assert.ok(log().some((l) => /factory-runner:latest timeout --kill-after=1m 45m bash -c /.test(l)), "the agent runs under timeout");
+    // Cleanup on a machine that does not answer logs it and goes on. The sweep removes the leftovers later.
+    const warn = console.warn; const warned: string[] = []; console.warn = (m: string) => warned.push(m);
+    try { await cleanup("r6"); } finally { console.warn = warn; }
+    assert.ok(warned.some((m) => /r6/.test(m) && /down/.test(m)), warned.join("\n"));
+
+    // Cleanup also stops the one-shot containers of the run, found by their run label.
+    const sm = "ssh://f@s", only = [{ target: sm, slots: 3 }];
+    mkdirSync(`${dir}/m/ssh___f_s/agents`, { recursive: true });
+    writeFileSync(`${dir}/m/ssh___f_s/agents/oneshot1`, "rk 1 oneshot1\n");
+    remember("rk", sm);
+    await cleanup("rk");
+    assert.ok(!ls(`${dir}/m/ssh___f_s/agents`).includes("oneshot1"), "the run's one-shot container is gone");
+
+    // The sweep: containers and volumes of runs that Inngest no longer runs, older than an hour.
+    for (const id of ["keep", "stale", "young"]) assert.equal(await place(id, only), sm);
+    assert.equal(await startIfFree("stale", "true", "issue #9", "stale", only), true);
+    assert.deepEqual(await sweep(sm, new Set(["keep"])), [], "nothing is an hour old yet");
+    const later = Date.now() + 2 * 3600_000;
+    const removed = await sweep(sm, new Set(["keep"]), later);
+    assert.deepEqual(removed.sort(), ["agent-stale", "run-stale-tmp", "run-stale-work", "run-young-tmp", "run-young-work"]);
+    assert.deepEqual(ls(`${dir}/m/ssh___f_s/vol`).sort(), ["run-keep-tmp", "run-keep-work"], "an active run keeps its volumes");
+
+    // A machine that comes back after it did not answer is ready for a sweep, once.
+    const flaky = [{ target: "ssh://f@flaky", slots: 1 }];
+    mkdirSync(`${dir}/off`, { recursive: true }); writeFileSync(`${dir}/off/ssh___f_flaky`, "");
+    assert.equal(await place("rf", flaky), null);
+    takeReadyToSweep();
+    rmSync(`${dir}/off/ssh___f_flaky`);
+    assert.equal(await place("rf", flaky), "ssh://f@flaky");
+    assert.deepEqual(takeReadyToSweep(), ["ssh://f@flaky"]);
+    assert.deepEqual(takeReadyToSweep(), [], "once");
   } finally { process.env.PATH = path; }
 }
 console.log("machine checks ok");
