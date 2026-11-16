@@ -68,17 +68,18 @@ const LIST_TIMEOUT = 10_000;
 /** Each machine's run volumes, or undefined for a machine that did not answer. Never an empty list for a silent machine. */
 const runVolumes = (machines: Machine[]) => Promise.all(machines.map((m) =>
   dockerCall(m.target, ["volume", "ls", "-q", "--filter", "name=run-"], { timeout: LIST_TIMEOUT }).then(
-    (r) => { if (unswept.has(m.target)) readyToSweep.add(m.target); return lines(r.stdout).filter((v) => /^run-.+-work$/.test(v)); },
+    (r) => { if (marked.has(m.target)) readyToSweep.add(m.target); return lines(r.stdout).filter((v) => /^run-.+-work$/.test(v)); },
     () => { sweepLater(m.target); return undefined; })));
 
-// A machine gets a sweep when it answers for the first time in this process, and again after each time it was silent.
-const unswept = new Set(MACHINES.map((m) => m.target));
+// A machine is marked for a sweep at the start of this process, and each time a call to it does not answer.
+// The next pick that gets an answer from a marked machine makes it ready. The mark stays while leftovers are too young.
+const marked = new Set(MACHINES.map((m) => m.target));
 const readyToSweep = new Set<string>();
-export const sweepLater = (machine: string) => { unswept.add(machine); readyToSweep.delete(machine); };
-/** The machines that answer again and wait for a sweep. Each one is handed out once. */
+const sweepLater = (machine: string) => { marked.add(machine); readyToSweep.delete(machine); };
+/** The machines that answer and wait for a sweep. Each one is handed out once per mark. */
 export function takeReadyToSweep(): string[] {
   const ready = [...readyToSweep];
-  for (const m of ready) { readyToSweep.delete(m); unswept.delete(m); }
+  for (const m of ready) { readyToSweep.delete(m); marked.delete(m); }
   return ready;
 }
 
@@ -86,17 +87,42 @@ export function takeReadyToSweep(): string[] {
 const STALE_AFTER = 3600_000;
 /**
  * Remove the containers and volumes of runs that are not in `active` (the runs Inngest still runs or queues),
- * older than an hour. Only what this kit labelled: factory.run and factory.created. Returns the removed names.
+ * older than an hour. Only what this kit labelled: factory.run and factory.created.
+ * `young`: some leftovers were too young to remove, so the machine needs another sweep later.
  */
-export async function sweep(machine: string, active: Set<string>, now = Date.now()): Promise<string[]> {
-  const fmt = (name: string) => `{{.Label "factory.run"}} {{.Label "factory.created"}} {{.${name}}}`;
-  const stale = (out: string) => lines(out).map((l) => l.split(" "))
-    .filter(([run, at, name]) => run && name && !active.has(run) && now - Number(at) > STALE_AFTER).map(([, , name]) => name);
-  const containers = stale((await dockerCall(machine, ["ps", "-a", "--filter", "label=factory.run", "--format", fmt("Names")])).stdout);
+export async function sweep(machine: string, active: Set<string>, now = Date.now()): Promise<{ removed: string[]; young: boolean }> {
+  let young = false;
+  const labelsAnd = (nameField: string) => `{{.Label "factory.run"}} {{.Label "factory.created"}} {{.${nameField}}}`;
+  const leftoverNames = (out: string) => lines(out).map((l) => l.split(" ")).filter(([run, created, name]) => {
+    if (!run || !name || active.has(run)) return false;
+    if (now - Number(created) > STALE_AFTER) return true;
+    young = true;
+    return false;
+  }).map(([, , name]) => name);
+  const containers = leftoverNames((await dockerCall(machine, ["ps", "-a", "--filter", "label=factory.run", "--format", labelsAnd("Names")])).stdout);
   if (containers.length) await dockerCall(machine, ["rm", "-f", ...containers]);
-  const volumes = stale((await dockerCall(machine, ["volume", "ls", "--filter", "label=factory.run", "--format", fmt("Name")])).stdout);
+  const volumes = leftoverNames((await dockerCall(machine, ["volume", "ls", "--filter", "label=factory.run", "--format", labelsAnd("Name")])).stdout);
   if (volumes.length) await dockerCall(machine, ["volume", "rm", "-f", ...volumes]);
-  return [...containers, ...volumes];
+  return { removed: [...containers, ...volumes], young };
+}
+
+/**
+ * Sweep the ready machines. Runs beside a run and never fails it. `runId` is the calling run, so it is surely active.
+ * If `listActive` does not hold it, the run ids do not match, and nothing is swept: a wrong list would remove live runs.
+ */
+export async function sweepReady(runId: string, listActive: () => Promise<Set<string>>): Promise<void> {
+  const ready = takeReadyToSweep();
+  if (!ready.length) return;
+  const active = await listActive().catch((e: Error) => { console.warn(`no sweep: ${e.message}`); return undefined; });
+  if (!active?.has(runId)) {
+    if (active) console.warn(`no sweep: Inngest does not list the active run ${runId}, so its run ids cannot be trusted.`);
+    return ready.forEach(sweepLater);
+  }
+  for (const m of ready) {
+    await sweep(m, active).then(
+      ({ removed, young }) => { if (removed.length) console.log(`sweep of ${hostOf(m)}: removed ${removed.join(" ")}`); if (young) sweepLater(m); },
+      (e: Error) => { console.warn(`sweep of ${hostOf(m)}: ${e.message.split("\n")[0]}`); sweepLater(m); });
+  }
 }
 // The labels the sweep reads. Every volume and container of a run gets them.
 const runLabels = (runId: string) => ["--label", `factory.run=${runId}`, "--label", `factory.created=${Date.now()}`];
@@ -233,25 +259,27 @@ export async function startAgent(runId: string, script: string, vars: Record<str
   await dockerCall(
     machine,
     ["run", "-d", "--name", `agent-${agent}`, "--label", `factory.subject=${subject}`, "--label", repoLabel(), "--label", `factory.machine=${hostOf(machine)}`, ...runLabels(runId), ...LIMITS, ...envFlags(vars), ...volumes(runId), "-w", "/work/repo", IMAGE,
-      // The agent stops itself after the maximum run time, also on a machine the orchestrator lost and that came back.
-      "timeout", "--kill-after=1m", `${MAX_MINUTES}m`, "bash", "-c", activityHook + script],
+      // The agent stops itself, also on a machine that the orchestrator could not reach for a while. The 5 extra minutes
+      // let the orchestrator's own check stop the run first, with its clear message.
+      "timeout", "--kill-after=1m", `${MAX_MINUTES + 5}m`, "bash", "-c", activityHook + script],
     { env: vars },
   );
 }
 
 /** null while the agent runs, else its exit code. A machine that does not answer counts as "still running". */
 export async function agentExitCode(runId: string, agent: string): Promise<number | null> {
-  const r = await dockerCall(await machineOf(runId), ["inspect", "-f", "{{.State.Status}} {{.State.ExitCode}}", `agent-${agent}`])
-    .catch((e) => { if (unreachable(e)) return null; throw e; });
-  if (!r) return null;
-  const { stdout } = r;
-  const [status, code] = stdout.trim().split(" ");
+  const machine = await machineOf(runId);
+  const inspected = await dockerCall(machine, ["inspect", "-f", "{{.State.Status}} {{.State.ExitCode}}", `agent-${agent}`])
+    .catch((e) => { if (unreachable(e)) return void sweepLater(machine); throw e; });
+  if (!inspected) return null;
+  const [status, code] = inspected.stdout.trim().split(" ");
   return status === "exited" || status === "dead" ? Number(code) : null;
 }
 
 /** The last lines an ended agent printed, without the activity lines. For the failure message: cleanup deletes the log. */
 export async function agentLogTail(runId: string, agent: string): Promise<string> {
-  const { stdout, stderr } = await dockerCall(await machineOf(runId), ["logs", "--tail", "60", `agent-${agent}`]).catch(() => ({ stdout: "", stderr: "" }));
+  const { stdout, stderr } = await dockerCall(await machineOf(runId), ["logs", "--tail", "60", `agent-${agent}`])
+    .catch((e: Error) => { console.warn(`log of agent ${agent}: ${e.message.split("\n")[0]}`); return { stdout: "", stderr: "" }; });
   return tailForMessage(stdout + stderr, [process.env.CLAUDE_CODE_OAUTH_TOKEN ?? ""]);
 }
 // The message goes into a GitHub comment, and the agent's container holds the model token: redact it.
@@ -286,13 +314,12 @@ export async function startIfFree(runId: string, script: string, subject: string
 
 /** Remove the run's containers and volumes. Never throws: what it cannot remove, it logs, and the sweep removes later. */
 export async function cleanup(runId: string): Promise<void> {
-  let machine: string | undefined;
   // The first line of docker's own error text says why, for example that ssh could not reach the machine.
-  const warn = (e: unknown) => { const { stderr, message } = e as { stderr?: string; message?: string };
-    console.warn(`cleanup of run ${runId}${machine ? ` on ${hostOf(machine)}` : ""}: ${(stderr?.trim() || message || "").split("\n")[0]}`); };
-  machine = await machineOf(runId).catch((e) => { warn(e); return undefined; });
-  if (!machine) return;
+  const why = (e: unknown) => { const { stderr, message } = e as { stderr?: string; message?: string }; return (stderr?.trim() || message || "").split("\n")[0]; };
+  const machine = await machineOf(runId).catch((e) => void console.warn(`cleanup of run ${runId}: ${why(e)}`));
+  if (!machine) return; // machineOf found no answer from some machine, and those machines are marked for a sweep
   runMachine.delete(runId);
+  const warn = (e: unknown) => { console.warn(`cleanup of run ${runId} on ${hostOf(machine)}: ${why(e)}`); if (unreachable(e)) sweepLater(machine); };
   // Every agent of the run (agent-<runId>, agent-<runId>-<key>), and its one-shot containers, found by the run label.
   const ids = new Set<string>();
   for (const filter of [`name=^agent-${runId}`, `label=factory.run=${runId}`]) {

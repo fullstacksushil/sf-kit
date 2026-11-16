@@ -244,7 +244,8 @@ export async function pushCommits(step: Step, runId: string, branch: string, opt
  * A child `flock` holds the lock until its stdin closes. The kernel drops the lock when that child or this
  * process dies, so a dead holder never blocks the others. The file's contents do not matter.
  */
-// ponytail: fn has no time limit, so a hung fn holds every factory's slot lock. The wait gives up after 5 minutes
+// ponytail: fn has no limit of its own. Each docker call in it has one (10 s to list, 60 s else), so a machine that stops
+// answering mid-call holds every factory's slot lock for up to about 3 minutes. A per-machine lock would fix that. The wait gives up after 5 minutes
 // with a LockTimeout, and runAgent counts that as "no slot now".
 // Needs util-linux flock on the host, and every factory must run as the same user (sticky /tmp refuses others' files).
 export async function hostLock<T>(fn: () => Promise<T>, path = "/tmp/factory-slots.flock", waitSeconds = 300): Promise<T> {
@@ -277,38 +278,26 @@ function slotLock<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 /**
- * Sweep the machines that answer again: remove what ended runs left there. Runs beside a run, never fails it.
- * `runId` is a run that is surely active. If Inngest does not list it, the run ids do not match and nothing is swept.
+ * The ids of every run that Inngest runs or queues, from every factory on this Inngest server. The sweep keeps their leftovers.
+ * Throws unless the list is surely whole: a run missing from it would lose its volumes.
  */
-async function sweepReady(runId: string): Promise<void> {
-  const ready = docker.takeReadyToSweep();
-  if (!ready.length) return;
-  const active = await activeRunIds().catch((e: Error) => { console.warn(`no sweep: ${e.message}`); return undefined; });
-  if (!active?.has(runId)) {
-    if (active) console.warn(`no sweep: Inngest does not list the active run ${runId}, so its run ids cannot be trusted.`);
-    return ready.forEach(docker.sweepLater);
-  }
-  for (const m of ready) {
-    await docker.sweep(m, active).then(
-      (gone) => { if (gone.length) console.log(`sweep of ${m}: removed ${gone.join(" ")}`); },
-      (e: Error) => { console.warn(`sweep of ${m}: ${e.message.split("\n")[0]}`); docker.sweepLater(m); });
-  }
-}
-
-/** The ids of every run that Inngest runs or queues, from every factory on this Inngest server. */
 // check: the GraphQL shape was read from the live self-hosted Inngest on 2026-11-13 (see cli/sf.mjs): POST /v0/gql with no key,
-// runs(first, orderBy, filter: {from, status}). Not tested: the filter without appIDs, and first: 500.
-// sweepReady checks that the list holds the calling run, so a wrong id shape sweeps nothing.
-async function activeRunIds(): Promise<Set<string>> {
+// runs(first, orderBy, filter: {from, status}). Not tested: the filter without appIDs, first: 500, and pageInfo.
+// A server without pageInfo answers with an error, and then nothing is swept.
+// The URL may hold a user and a password (basic auth). fetch refuses such a URL, so they go into a header, as in cli/sf.mjs.
+export async function activeRunIds(base = process.env.INNGEST_BASE_URL ?? "http://127.0.0.1:8288", fetchFn: typeof fetch = fetch): Promise<Set<string>> {
+  const url = new URL(base);
+  const auth: Record<string, string> = url.username ? { authorization: `Basic ${Buffer.from(`${decodeURIComponent(url.username)}:${decodeURIComponent(url.password)}`).toString("base64")}` } : {};
+  url.username = url.password = "";
   const from = new Date(Date.now() - 365 * 86_400_000).toISOString();
-  const query = `query($from: Time!) { runs(first: 500, orderBy: [{field: QUEUED_AT, direction: DESC}], filter: {from: $from, status: [RUNNING, QUEUED]}) { edges { node { id } } } }`;
-  const r = await fetch(`${process.env.INNGEST_BASE_URL ?? "http://127.0.0.1:8288"}/v0/gql`, {
-    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ query, variables: { from } }), signal: AbortSignal.timeout(10_000),
+  const query = `query($from: Time!) { runs(first: 500, orderBy: [{field: QUEUED_AT, direction: DESC}], filter: {from: $from, status: [RUNNING, QUEUED]}) { edges { node { id } } pageInfo { hasNextPage } } }`;
+  const r = await fetchFn(`${url.href.replace(/\/$/, "")}/v0/gql`, {
+    method: "POST", headers: { "content-type": "application/json", ...auth }, body: JSON.stringify({ query, variables: { from } }), signal: AbortSignal.timeout(10_000),
   });
-  const edges = ((await r.json()) as { data?: { runs?: { edges?: { node: { id: string } }[] } } }).data?.runs?.edges;
-  if (!Array.isArray(edges)) throw new Error("Inngest gave no run list.");
-  if (edges.length >= 500) throw new Error("Inngest lists 500 or more active runs, so the list may be cut.");
-  return new Set(edges.map((e) => e.node.id));
+  const runs = ((await r.json()) as { data?: { runs?: { edges?: { node: { id: string } }[]; pageInfo?: { hasNextPage?: boolean } } } }).data?.runs;
+  if (!Array.isArray(runs?.edges)) throw new Error("Inngest gave no run list.");
+  if (runs.pageInfo?.hasNextPage !== false) throw new Error("Inngest did not say the run list is whole, so it may be cut.");
+  return new Set(runs.edges.map((e) => e.node.id));
 }
 
 /**
@@ -321,7 +310,7 @@ export async function placeRun(step: Step, runId: string): Promise<void> {
     const machine = (await step.run(`place-${i}`, () => slotLock(() => docker.place(runId))
       .catch((e) => { if (e instanceof LockTimeout) return null; throw e; }))) as string | null;
     // On a replay this is the stored result. Every later step of this invocation uses it.
-    if (machine) { docker.remember(runId, machine); void sweepReady(runId); return; }
+    if (machine) { docker.remember(runId, machine); void docker.sweepReady(runId, () => activeRunIds()); return; }
     if (i >= 120) throw new Error("No machine had a slot for 2 hours. Check the slot counts in FACTORY_MACHINES.");
     await step.sleep(`wait-place-${i}`, "1m");
   }

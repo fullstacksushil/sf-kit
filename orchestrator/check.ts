@@ -262,7 +262,7 @@ console.log("activity hook checks ok");
   } finally { process.env.PATH = path; }
 }
 { // Placement: a run's volumes live on one machine and record where the run is. Every call of the run goes there.
-  const { place, findRun, oneShot, cleanup, startIfFree, agentExitCode, failureNote, remember, sweep, takeReadyToSweep } = await import("./src/docker.ts");
+  const { place, findRun, oneShot, cleanup, startIfFree, agentExitCode, failureNote, remember, sweep, takeReadyToSweep, sweepReady } = await import("./src/docker.ts");
   const { writeFileSync, chmodSync, readdirSync: ls, rmSync, mkdirSync } = await import("node:fs");
   const dir = mkdtempSync(`${tmpdir()}/sf-place-`);
   // A fake docker with state per DOCKER_HOST. A volume or container is a file that holds "<run> <created> <name>".
@@ -354,7 +354,7 @@ exit 0
     remember("rg", "ssh://f@b");
     await assert.rejects(agentExitCode("rg", "gone"), /No such object/);
     // The agent stops itself after the maximum run time, also when no one checks it any more.
-    assert.ok(log().some((l) => /factory-runner:latest timeout --kill-after=1m 45m bash -c /.test(l)), "the agent runs under timeout");
+    assert.ok(log().some((l) => /factory-runner:latest timeout --kill-after=1m 50m bash -c /.test(l)), "the agent runs under timeout, 5 minutes past the last check");
     // Cleanup on a machine that does not answer logs it and goes on. The sweep removes the leftovers later.
     const warn = console.warn; const warned: string[] = []; console.warn = (m: string) => warned.push(m);
     try { await cleanup("r6"); } finally { console.warn = warn; }
@@ -371,13 +371,13 @@ exit 0
     // The sweep: containers and volumes of runs that Inngest no longer runs, older than an hour.
     for (const id of ["keep", "stale", "young"]) assert.equal(await place(id, only), sm);
     assert.equal(await startIfFree("stale", "true", "issue #9", "stale", only), true);
-    assert.deepEqual(await sweep(sm, new Set(["keep"])), [], "nothing is an hour old yet");
+    assert.deepEqual(await sweep(sm, new Set(["keep"])), { removed: [], young: true }, "nothing is an hour old yet");
     const later = Date.now() + 2 * 3600_000;
-    const removed = await sweep(sm, new Set(["keep"]), later);
+    const { removed } = await sweep(sm, new Set(["keep"]), later);
     assert.deepEqual(removed.sort(), ["agent-stale", "run-stale-tmp", "run-stale-work", "run-young-tmp", "run-young-work"]);
     assert.deepEqual(ls(`${dir}/m/ssh___f_s/vol`).sort(), ["run-keep-tmp", "run-keep-work"], "an active run keeps its volumes");
 
-    // A machine that comes back after it did not answer is ready for a sweep, once.
+    // A machine that answers after a call to it did not answer is ready for a sweep, once.
     const flaky = [{ target: "ssh://f@flaky", slots: 1 }];
     mkdirSync(`${dir}/off`, { recursive: true }); writeFileSync(`${dir}/off/ssh___f_flaky`, "");
     assert.equal(await place("rf", flaky), null);
@@ -386,6 +386,43 @@ exit 0
     assert.equal(await place("rf", flaky), "ssh://f@flaky");
     assert.deepEqual(takeReadyToSweep(), ["ssh://f@flaky"]);
     assert.deepEqual(takeReadyToSweep(), [], "once");
+
+    // The gate: no sweep when Inngest does not list the run that asks for it. The machine stays marked.
+    const fl = "ssh://f@flaky", off = () => writeFileSync(`${dir}/off/ssh___f_flaky`, ""), on = () => rmSync(`${dir}/off/ssh___f_flaky`);
+    off(); await place("x1", flaky); on();
+    assert.equal(await place("rf3", flaky), fl);
+    const rms = () => log().filter((l) => l.startsWith(`${fl} rm `) || l.startsWith(`${fl} volume rm `)).length;
+    await sweepReady("rf3", async () => new Set(["other"]));
+    assert.equal(rms(), 0, "the gate refused, nothing removed");
+    // Through the gate: leftovers younger than an hour stay, and so does the mark, so a later pick sweeps again.
+    assert.equal(await place("rf4", flaky), fl);
+    await sweepReady("rf3", async () => new Set(["rf3"]));
+    assert.ok(ls(`${dir}/m/ssh___f_flaky/vol`).includes("run-rf4-work"), "a young leftover stays");
+    await place("rf5", flaky);
+    assert.deepEqual(takeReadyToSweep(), [fl], "still marked while young leftovers wait");
+    // A cleanup or an exit check that cannot reach the machine marks it for a sweep.
+    remember("rc", fl); off();
+    assert.equal(await agentExitCode("rc", "rc"), null);
+    on(); await place("rc2", flaky);
+    assert.deepEqual(takeReadyToSweep(), [fl], "the exit check marked the machine");
+    off();
+    await cleanup("rc");
+    on(); await place("rc3", flaky);
+    assert.deepEqual(takeReadyToSweep(), [fl], "the failed cleanup marked the machine");
   } finally { process.env.PATH = path; }
+}
+{ // The list of active runs that gates the sweep. A cut list must never pass: the runs it leaves out would be swept.
+  const { activeRunIds } = await import("./src/run.ts");
+  const calls: { url: string; auth?: string }[] = [];
+  const answer = (body: unknown) => (async (url: string, init: { headers: Record<string, string> }) => {
+    calls.push({ url, auth: init.headers.authorization });
+    return { json: async () => body };
+  }) as unknown as typeof fetch;
+  const page = (ids: string[], hasNextPage: boolean) => ({ data: { runs: { edges: ids.map((id) => ({ node: { id } })), pageInfo: { hasNextPage } } } });
+  assert.deepEqual(await activeRunIds("http://op:p%2Fw@127.0.0.1:8288/", answer(page(["a", "b"], false))), new Set(["a", "b"]));
+  assert.deepEqual(calls[0], { url: "http://127.0.0.1:8288/v0/gql", auth: `Basic ${Buffer.from("op:p/w").toString("base64")}` }, "the password goes in a header");
+  await assert.rejects(activeRunIds("http://127.0.0.1:8288", answer(page(["a"], true))), /cut/);
+  await assert.rejects(activeRunIds("http://127.0.0.1:8288", answer(page(["a"], undefined as unknown as boolean))), /cut/, "no page info: maybe cut");
+  await assert.rejects(activeRunIds("http://127.0.0.1:8288", answer({ errors: [{ message: "no field" }] })), /no run list/);
 }
 console.log("machine checks ok");
