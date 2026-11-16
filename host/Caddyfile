@@ -1,8 +1,47 @@
-# Only the webhook route is public. /api/inngest and the dashboards stay private.
-# Replace the host name, then: sudo cp Caddyfile /etc/caddy/Caddyfile && sudo systemctl reload caddy
+# Public routes of a factory host. /api/inngest stays private: no site here serves it.
+# Replace the host names, the user and the hash. Then:
+#   sudo cp Caddyfile /etc/caddy/Caddyfile && sudo systemctl reload caddy
+# Caddy gets a certificate for each host name, so each name needs a DNS record that points to this host,
+# and ports 80 and 443 must be open. Delete a site you do not use.
+
+# The webhook routes, one path per factory: /webhooks/<factory name> goes to that factory's PORT.
+# The GitHub webhook of a repo points at https://<this name>/webhooks/<factory name>.
+# Each orchestrator checks the signature with its own GITHUB_WEBHOOK_SECRET. Not needed with GITHUB_POLL=1 alone.
 factory.example.com {
-	handle /webhooks/* {
+	handle /webhooks/qf {
+		rewrite * /webhooks/github
 		reverse_proxy localhost:3000
 	}
+	# Copy the block for each more factory, with its name and port.
 	respond 404
+}
+
+# The dashboards, behind basic auth. Make the hash with: caddy hash-password
+# The Inngest dashboard has no sign-in of its own, and whoever reaches it can start and cancel runs.
+(dashboard) {
+	basic_auth {
+		operator REPLACE_WITH_HASH
+	}
+}
+
+inngest.example.com {
+	import dashboard
+	# The dashboard's own server must not see the basic auth header.
+	reverse_proxy localhost:8288 {
+		header_up -Authorization
+		# Inngest answers 401 on some paths the dashboard asks for, for example /dev. A browser that gets a 401
+		# after it sent the password drops the password and asks again, without end. So the browser gets a 403.
+		@upstream401 status 401
+		handle_response @upstream401 {
+			copy_response 403
+		}
+	}
+}
+
+# Phoenix asks for its own sign-in after this one.
+phoenix.example.com {
+	import dashboard
+	reverse_proxy localhost:6006 {
+		header_up -Authorization
+	}
 }

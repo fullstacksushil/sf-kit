@@ -103,18 +103,9 @@ say "Run network $SUBNET with firewall rules"
 if [ "$DRY" = 1 ] || ! docker network inspect factory-net >/dev/null 2>&1; then
   run docker network create factory-net --subnet "$SUBNET"
 fi
-# Run containers may reach the internet, each other and Phoenix. Not private networks, not this host.
-rule() { if [ "$DRY" = 1 ] || ! sudo iptables -C "$@" 2>/dev/null; then run sudo iptables -I "$@"; fi; }
-# 100.64.0.0/10 is carrier-grade NAT, also the range Tailscale gives its machines.
-for cidr in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16 100.64.0.0/10; do
-  rule DOCKER-USER -s "$SUBNET" -d "$cidr" -j DROP
-done
-rule DOCKER-USER -s "$SUBNET" -d "$SUBNET" -j ACCEPT
-rule INPUT -s "$SUBNET" -j DROP
-# Inserted above the DROP: replies to connections the host opened (your browser to Phoenix on 6006) pass.
-# Agents still cannot open a connection to the host.
-rule INPUT -s "$SUBNET" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-echo "These iptables rules do not survive a reboot. Save them with iptables-save or your distro's tool."
+# The rules are in host/factory-firewall.sh. With systemd, factory-firewall.service adds them again at each boot.
+if [ "$DRY" = 1 ]; then "$KIT/host/factory-firewall.sh" --dry-run "$SUBNET"; else sudo "$KIT/host/factory-firewall.sh" "$SUBNET"; fi
+[ "$SYSTEMD" = 1 ] || echo "These iptables rules do not survive a reboot. Run host/factory-firewall.sh as root at each boot."
 
 say "Inngest, Postgres, Redis${OBS:+ (observability: $OBS)}"
 run cp "$KIT/host/compose.yaml" "$OPT/compose.yaml"
@@ -138,7 +129,11 @@ if [ "$SYSTEMD" = 1 ]; then
   else
     sed "s/__USER__/$ME/" "$KIT/host/factory-orchestrator@.service" | sudo tee "$UNIT" >/dev/null
   fi
+  # The firewall unit: no factory starts before the rules of the run network are in place.
+  run sudo install -m 755 "$KIT/host/factory-firewall.sh" /usr/local/sbin/factory-firewall.sh
+  run sudo install -m 644 "$KIT/host/factory-firewall.service" /etc/systemd/system/factory-firewall.service
   run sudo systemctl daemon-reload
+  run sudo systemctl enable --now factory-firewall.service
   echo "No factory is started. setup-wizard.sh creates each factory and starts it."
 fi
 
@@ -159,7 +154,7 @@ fi
 
 say "Next steps"
 cat <<EOF
-1. Make /webhooks/* public: edit $KIT/host/Caddyfile, then install it in Caddy.
+1. Make /webhooks/<factory name> public: edit $KIT/host/Caddyfile, then install it in Caddy.
    Laptop: use a tunnel that forwards only /webhooks/* instead.
 2. Run $KIT/setup-wizard.sh once for each repo. It creates one factory per repo and checks each value:
    the repo, the GitHub token, the Claude token, optional Langfuse keys, the firewall rule
@@ -167,5 +162,6 @@ cat <<EOF
    Without the firewall rule, Inngest logs "dial tcp 172.17.0.1:3000: i/o timeout" and no run starts.
 3. Dashboards: on this machine, open http://localhost:8288 (Inngest) and http://localhost:6006 (Phoenix).
    On a VPS, tunnel them first: ssh -L 8288:localhost:8288 -L 6006:localhost:6006 <you>@<vps-address>
+   Or serve them behind basic auth: the two dashboard sites in $KIT/host/Caddyfile.
 4. Test: add agent:implement to a small issue. Then run the checks in playbooks/04, "Checks for Option B".
 EOF

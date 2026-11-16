@@ -1,0 +1,13 @@
+[Unit]
+Description=Software factory firewall rules for the run network
+# Docker makes the DOCKER-USER chain at its start, and iptables rules do not survive a reboot.
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/factory-firewall.sh
+
+[Install]
+WantedBy=multi-user.target

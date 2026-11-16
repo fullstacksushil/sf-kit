@@ -17,6 +17,10 @@ has "OTEL_TRACES_ENDPOINT=http://phoenix:6006/v1/traces"
 has "mkdir -p /etc/factory/factories"
 has "chown $ME /etc/factory/factories"
 has "factory-orchestrator@.service"
+has "iptables -I DOCKER-USER -s 172.30.0.0/24 -d 169.254.0.0/16 -j DROP"
+has "iptables -I INPUT -s 172.30.0.0/24 -j DROP"
+has "systemctl enable --now factory-firewall.service"
+hasnt "do not survive a reboot"
 has "setup-wizard.sh"
 for v in GITHUB_WEBHOOK_SECRET GITHUB_REPO INNGEST_SERVE_ORIGIN FACTORY_PAT orchestrator.env; do hasnt "$v"; done
 # the template unit file
@@ -27,6 +31,7 @@ u() { grep -qF -- "$1" "$U" || { echo "FAIL: unit lacks: $1"; FAIL=1; }; }
 u "EnvironmentFile=/etc/factory/common.env"
 u "EnvironmentFile=/etc/factory/factories/%i.env"
 u "FACTORY_NAME=%i"
+u "Requires=docker.service factory-firewall.service"
 u "ExecStartPost=/usr/bin/env curl -f"
 u "--retry-connrefused"
 u "--retry-all-errors"

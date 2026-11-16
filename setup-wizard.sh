@@ -541,8 +541,8 @@ if confirm "No public URL here (a laptop)? Use polling instead of a webhook?"; t
 else
   # A rerun that switches to the webhook turns polling off, so the two do not both start runs.
   write_env GITHUB_POLL 0
-  say "GitHub must reach https://<public host>/webhooks/github."
-  step "VPS: install sf-kit/host/Caddyfile in Caddy. It serves /webhooks/* and nothing else."
+  say "GitHub must reach https://<public host>/webhooks/github. With several factories on one host, use /webhooks/$FACTORY."
+  step "VPS: install sf-kit/host/Caddyfile in Caddy. It maps /webhooks/<factory name> to the port of that factory."
   step "Laptop: use a tunnel that forwards only /webhooks/* to port $PORT."
   ask WEBHOOK_URL "Public webhook URL (https://.../webhooks/github):"
   secret=$(_existing GITHUB_WEBHOOK_SECRET)

@@ -1,7 +1,8 @@
 [Unit]
 Description=Software factory orchestrator for %i (Inngest functions + GitHub webhooks)
-After=docker.service network-online.target
-Requires=docker.service
+# factory-firewall.service adds the rules that keep agents off this host and off private networks.
+After=docker.service network-online.target factory-firewall.service
+Requires=docker.service factory-firewall.service
 
 [Service]
 # init-host.sh replaces __USER__ with a user in the docker group.
