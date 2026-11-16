@@ -92,6 +92,16 @@ export async function agentExitCode(agent: string): Promise<number | null> {
   return status === "exited" || status === "dead" ? Number(code) : null;
 }
 
+/** The last lines an ended agent printed, without the activity lines. For the failure message: cleanup deletes the log. */
+export async function agentLogTail(agent: string): Promise<string> {
+  const { stdout, stderr } = await exec("docker", ["logs", "--tail", "60", `agent-${agent}`]).catch(() => ({ stdout: "", stderr: "" }));
+  return tailForMessage(stdout + stderr, [process.env.CLAUDE_CODE_OAUTH_TOKEN ?? ""]);
+}
+// The message goes into a GitHub comment, and the agent's container holds the model token: redact it.
+export const tailForMessage = (log: string, secrets: string[] = []) =>
+  [...secrets.filter(Boolean), /sk-ant-[\w-]+/g].reduce<string>((t, s) => t.replaceAll(s, "<redacted>"), log)
+    .split("\n").filter((l) => l.trim() && !l.startsWith('{"sf":1')).slice(-8).join("\n").slice(-600).replaceAll("```", "~~~");
+
 /** True when this run's agent container exists, running or not. */
 export async function agentExists(agent: string): Promise<boolean> {
   const { stdout } = await exec("docker", ["ps", "-aq", "--filter", `name=^agent-${agent}$`]);

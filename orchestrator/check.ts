@@ -207,4 +207,12 @@ console.log("multi-factory checks ok");
   assert.match(r2.stdout, /agent-ran/);
   assert.equal(readFileSync(`${home2}/.claude/settings.json`, "utf8"), '{"model":"x"}');
 }
+{
+  const { tailForMessage } = await import("./src/docker.ts");
+  const log = ['{"sf":1,"t":1,"ev":"PreToolUse"}', ...Array.from({ length: 12 }, (_, i) => `line ${i}`), "", "token tok-123 and sk-ant-oat01-AbC_d", "```", "Error: boom"].join("\n");
+  const tail = tailForMessage(log, ["tok-123", ""]);
+  assert.ok(tail.endsWith("Error: boom") && tail.split("\n").length === 8, "the last 8 lines with text");
+  assert.ok(!/tok-123|sk-ant|"sf":1|```/.test(tail) && tail.includes("token <redacted> and <redacted>"), "no secret, no activity line, no fence");
+  assert.ok(tailForMessage("x".repeat(5000)).length === 600 && tailForMessage("") === "");
+}
 console.log("activity hook checks ok");

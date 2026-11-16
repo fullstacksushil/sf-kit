@@ -49,7 +49,11 @@ export const reviewPr = inngest.createFunction(
       await runAgent(
         step,
         runId,
-        specScript(n) + cloneScript(`git checkout ${pr.branch}`),
+        // A branch from before the factory setup has no workflow file, and the agent then exits 1 with a module
+        // error. First seen on 2026-11-13, on PRs opened before the repo had its factory files. Stop in prepare with the fix in the message.
+        specScript(n) + cloneScript(`git checkout ${pr.branch}`) + `
+          test -f .sandcastle/agent-workflows/review/review.ts || { echo "The branch ${pr.branch} has no factory files. Add agent:rebase to rebase it onto ${pr.base} first."; exit 1; }
+        `,
         `BASE_REF=${pr.base} PR_NUMBER=${n} BRANCH=${pr.branch} OUTPUT_DIR=/tmp npx tsx .sandcastle/agent-workflows/review/review.ts`,
         `review PR #${n}`,
       );

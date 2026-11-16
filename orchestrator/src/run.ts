@@ -310,7 +310,10 @@ export async function runAgent(step: Step, runId: string, prepare: string | null
     code = (await step.run(id(`check-${i}`), () => docker.agentExitCode(agent))) as number | null;
   }
   if (code === null) throw new Error(`The agent ran longer than ${MAX_MINUTES} minutes.`);
-  if (code !== 0) throw new Error(`The agent exited with code ${code}.`);
+  if (code !== 0) {
+    const tail = (await step.run(id("read-log"), () => docker.agentLogTail(agent))) as string;
+    throw new Error(`The agent exited with code ${code}.${tail ? ` Its last output:\n\n\`\`\`\n${tail}\n\`\`\`\n` : ""}`);
+  }
 }
 
 /**
