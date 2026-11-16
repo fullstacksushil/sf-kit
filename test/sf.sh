@@ -302,9 +302,18 @@ ok "remote: user and password go as a basic auth header" 'grep -qx "Basic b3A6cC
 ok "remote: the password is never printed" '! grep -q "p%2Fw\|p/w\|op:" <<<"$rboard" && grep -q "Inngest http://127.0.0.1:" <<<"$rboard"'
 (cd "$T/repo" && env -u INNGEST_BASE_URL ENV_DIR="$T/remote" "$SF" ratchet >/dev/null 2>&1 </dev/null)
 ok "remote: a manual event goes to the host with its key" 'grep -q "^/e/k9 .*factory/repo-a/ratchet.requested" "$T/events.log"'
+# A second host: the factory file names its own Inngest and key. They win over common.env.
+printf "GITHUB_REPO=Owner/Repo\nORCHESTRATOR_URL=http://127.0.0.1:1\nINNGEST_BASE_URL=http://127.0.0.1:$(cat "$T/port")\nINNGEST_EVENT_KEY=k2\n" > "$T/remote/factories/repo-a.env"
+(cd "$T/repo" && env -u INNGEST_BASE_URL -u INNGEST_EVENT_KEY ENV_DIR="$T/remote" "$SF" ratchet >/dev/null 2>&1 </dev/null)
+ok "hosts: a factory file names its own Inngest and key" 'grep -q "^/e/k2 .*factory/repo-a/ratchet.requested" "$T/events.log"'
+printf 'GITHUB_REPO=Owner/Repo\nORCHESTRATOR_URL=http://127.0.0.1:1\n' > "$T/remote/factories/repo-a.env"
 mkdir -p "$T/home/.config/sf/factories"; cp "$T/remote/common.env" "$T/home/.config/sf/"; cp "$T/remote/factories/repo-a.env" "$T/home/.config/sf/factories/"
 ok "remote: ~/.config/sf wins over /etc/factory when ENV_DIR is not set" '(cd "$T/repo" && env -u INNGEST_BASE_URL -u ENV_DIR -u XDG_CONFIG_HOME "$SF" 2>&1 </dev/null) | grep -q "Runs: Inngest has no app software-factory-repo-a"'
 rm -rf "$T/home/.config/sf"
+# Two env folders: a factory found in the second folder uses the common.env of that folder.
+mkdir -p "$T/other/factories"; printf 'GITHUB_REPO=Owner/Other\nPORT=3009\n' > "$T/other/factories/other.env"
+(cd "$T/repo" && env -u INNGEST_BASE_URL -u INNGEST_EVENT_KEY ENV_DIR="$T/other:$T/remote" "$SF" ratchet >/dev/null 2>&1 </dev/null)
+ok "hosts: sf searches every env folder" 'grep -q "^/e/k9 .*factory/repo-a/ratchet.requested" <(tail -1 "$T/events.log")'
 git remote set-url origin git@github.com:owner/nofactory.git
 out=$(cd "$T/repo" && "$SF" 2>&1 </dev/null); rc=$?
 ok "runs: no factory, one line, no undefined" '[ $rc -eq 0 ] && grep -q "Runs: no factory found for this repo" <<<"$out" && ! grep -q undefined <<<"$out" && grep -q "Agents" <<<"$out"'

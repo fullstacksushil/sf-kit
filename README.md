@@ -73,10 +73,12 @@ After an update of the orchestrator code, restart every factory: `sudo systemctl
 
 ### `sf` on another machine
 
-`sf` can run on a machine that is not the factory host. Make the folder `~/.config/sf` on that machine. `sf` reads this folder before `/etc/factory`.
+`sf` can run on a machine that is not the factory host. Make the folder `~/.config/sf` on that machine. `sf` searches this folder first, then `/etc/factory`. So one machine can use its own factories and factories on other hosts.
 
 - `factories/<name>.env`: `GITHUB_REPO`, and `ORCHESTRATOR_URL` with the public address of the host. It needs no `PORT`.
 - `common.env`: `INNGEST_BASE_URL` and `INNGEST_EVENT_KEY` of the host. For an Inngest dashboard behind basic auth, put the user and the password in the URL: `https://<user>:<password>@<host>`. Percent-encode the password. `sf` sends them as a header and never prints them.
+
+For factories on several hosts, put `INNGEST_BASE_URL` and `INNGEST_EVENT_KEY` in each factory file. A value in a factory file wins over `common.env`.
 
 Give the files mode 600. The board then shows the runs of the host. It shows no agents, and `sf logs` finds none, because both read the Docker of the local machine.
 
