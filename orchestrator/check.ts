@@ -262,11 +262,12 @@ console.log("activity hook checks ok");
   } finally { process.env.PATH = path; }
 }
 { // Placement: a run's volumes live on one machine and record where the run is. Every call of the run goes there.
-  const { place, findRun, oneShot, cleanup, startIfFree, agentExitCode, failureNote } = await import("./src/docker.ts");
-  const { writeFileSync, chmodSync, readdirSync: ls } = await import("node:fs");
+  const { place, findRun, oneShot, cleanup, startIfFree, agentExitCode, failureNote, remember } = await import("./src/docker.ts");
+  const { writeFileSync, chmodSync, readdirSync: ls, rmSync } = await import("node:fs");
   const dir = mkdtempSync(`${tmpdir()}/sf-place-`);
   // A fake docker with state per DOCKER_HOST: volumes and agent containers are files.
   writeFileSync(`${dir}/docker`, `#!/bin/sh
+case "\${DOCKER_HOST:-}" in *down*) echo "ssh: connect to host down: No route to host" >&2; exit 255 ;; esac
 h=$(printf %s "\${DOCKER_HOST:-local}" | tr -c 'A-Za-z0-9' _); d="${dir}/m/$h"; mkdir -p "$d/vol" "$d/agents"
 echo "\${DOCKER_HOST:-local} $*" | tr "\\n" " " >> "${dir}/log"; echo >> "${dir}/log"
 case "$1 $2" in
@@ -320,6 +321,24 @@ exit 0
     // A failure on a worker machine names it. On local, the message stays as it was.
     assert.equal(await failureNote("r1"), " (on b)");
     assert.equal(await failureNote("r2"), "");
+
+    // A machine that does not answer is left out of the pick. It never counts as an empty machine.
+    const withDown = [{ target: "ssh://f@down", slots: 5 }, ...machines];
+    assert.equal(await place("r5", withDown), "ssh://f@b", "the down machine has the most slots and no known load");
+    // Finding a run: a hit counts even when another machine is down. No hit while a machine is down is an error,
+    // because the run may be on that machine. Only a run that no machine holds is "not placed".
+    assert.equal(await findRun("r5", withDown), "ssh://f@b");
+    await assert.rejects(findRun("r-lost", withDown), /down did not answer/);
+    assert.equal(await findRun("r-lost", machines), undefined);
+    // The pick's step result is what later steps use, also after a restart, without asking any machine.
+    remember("r6", "ssh://f@down");
+    await assert.rejects(oneShot("r6", "true"), /No route to host/, "a run on a down machine fails, it does not move to local");
+
+    // A drained machine (0 slots) still lets the runs it holds start their agents, one at a time.
+    const drained = [{ target: "local", slots: 1 }, { target: "ssh://f@b", slots: 0 }];
+    for (const a of ls(`${dir}/m/ssh___f_b/agents`)) rmSync(`${dir}/m/ssh___f_b/agents/${a}`);
+    assert.equal(await startIfFree("r5", "true", "issue #5", "r5", drained), true, "its run finishes there");
+    assert.equal(await startIfFree("r1", "true", "issue #1", "r1", drained), false, "one agent at a time");
   } finally { process.env.PATH = path; }
 }
 console.log("machine checks ok");

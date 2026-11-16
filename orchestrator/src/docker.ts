@@ -47,21 +47,30 @@ export async function dockerCall(machine: string, args: string[], opts: { env?: 
 
 // ── placement: which machine a run uses ──────────────────────────────────
 // A run's two volumes live on one machine for the whole run, so every container of the run must go there.
-// The volumes are also the record of where a run is: after a restart, findRun asks each machine.
+// The pick is a step result: placeRun hands it to remember() on every replay, so later steps use it.
+// The volumes are the record for code without that result (onFailure): findRun asks each machine.
 const runMachine = new Map<string, string>();
+export const remember = (runId: string, machine: string) => void runMachine.set(runId, machine);
 const hostOf = (target: string) => target.replace(/^ssh:\/\/[^@]*@/, "").replace(/:\d+$/, "");
 const lines = (out: string) => out.split("\n").map((l) => l.trim()).filter(Boolean);
-// A machine that does not answer counts as "no volumes here".
-const volumeNames = (machine: string, prefix: string) =>
-  dockerCall(machine, ["volume", "ls", "-q", "--filter", `name=${prefix}`]).then((r) => lines(r.stdout), () => [] as string[]);
+// A short limit: the pick holds the slot lock of every factory on the host while it asks.
+const LIST_TIMEOUT = 10_000;
+/** Each machine's run volumes, or undefined for a machine that did not answer. Never an empty list for a silent machine. */
+const runVolumes = (machines: Machine[]) => Promise.all(machines.map((m) =>
+  dockerCall(m.target, ["volume", "ls", "-q", "--filter", "name=run-"], { timeout: LIST_TIMEOUT })
+    .then((r) => lines(r.stdout).filter((v) => /^run-.+-work$/.test(v)), () => undefined)));
 
-/** The machine that holds the run's volumes, or undefined. */
+/** The machine that holds the run's volumes. undefined: no machine holds them. Throws when the run may be on a silent machine. */
 export async function findRun(runId: string, machines = MACHINES): Promise<string | undefined> {
-  const found = await Promise.all(machines.map(async (m) => (await volumeNames(m.target, `run-${runId}-work`)).includes(`run-${runId}-work`)));
-  return machines.find((_, i) => found[i])?.target;
+  const lists = await runVolumes(machines);
+  const hit = machines.find((_, i) => lists[i]?.includes(`run-${runId}-work`));
+  if (hit) return hit.target;
+  const silent = machines.filter((_, i) => !lists[i]).map((m) => hostOf(m.target));
+  if (silent.length) throw new Error(`The machine of run ${runId} is unknown: ${silent.join(", ")} did not answer.`);
+  return undefined;
 }
 
-/** The run's machine. A run with no volumes yet (not placed) uses local, as before machines existed. */
+/** The run's machine. Only a run that no machine holds (never placed) uses local, as before machines existed. */
 async function machineOf(runId: string): Promise<string> {
   const known = runMachine.get(runId) ?? await findRun(runId);
   if (known) runMachine.set(runId, known);
@@ -74,12 +83,14 @@ async function machineOf(runId: string): Promise<string> {
  * The load is the share of a machine's slots that its runs hold, counting runs that only prepare.
  */
 export async function place(runId: string, machines = MACHINES): Promise<string | null> {
-  const found = await findRun(runId, machines);
-  if (found) return (runMachine.set(runId, found), found);
-  const open = machines.filter((m) => m.slots > 0);
-  const loads = await Promise.all(open.map(async (m) => (await volumeNames(m.target, "run-")).filter((v) => /^run-.+-work$/.test(v)).length / m.slots));
-  // Least load first. On a tie, the machine with more slots.
-  const best = open.map((m, i) => ({ m, load: loads[i] })).sort((a, b) => a.load - b.load || b.m.slots - a.m.slots)[0]?.m;
+  const lists = await runVolumes(machines);
+  const found = machines.find((_, i) => lists[i]?.includes(`run-${runId}-work`));
+  if (found) return (runMachine.set(runId, found.target), found.target);
+  // A machine that did not answer is left out. Least load first. On a tie, the machine with more slots.
+  // ponytail: a retry after a pick on a machine that then went silent picks again. Ticket 04's sweep removes the stale volumes.
+  const best = machines.map((m, i) => ({ m, load: (lists[i]?.length ?? 0) / m.slots, answered: !!lists[i] }))
+    .filter((c) => c.answered && c.m.slots > 0)
+    .sort((a, b) => a.load - b.load || b.m.slots - a.m.slots)[0]?.m;
   if (!best) return null;
   for (const v of ["work", "tmp"]) await dockerCall(best.target, ["volume", "create", "--label", repoLabel(), `run-${runId}-${v}`]);
   runMachine.set(runId, best.target);
@@ -222,7 +233,8 @@ export async function runningAgents(machine: string): Promise<number> {
 export async function startIfFree(runId: string, script: string, subject: string, agent = runId, machines = MACHINES): Promise<boolean> {
   const machine = await machineOf(runId);
   if (await agentExists(machine, agent)) return true;
-  if ((await runningAgents(machine)) >= (machines.find((m) => m.target === machine)?.slots ?? 0)) return false;
+  // A drained machine (0 slots, or no longer listed) still runs the agents of the runs it holds, one at a time.
+  if ((await runningAgents(machine)) >= Math.max(1, machines.find((m) => m.target === machine)?.slots ?? 0)) return false;
   await startAgent(runId, script, agentEnv(runId, machine), subject, agent);
   return true;
 }

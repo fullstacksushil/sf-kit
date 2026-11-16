@@ -76,7 +76,9 @@ After an update of the orchestrator code, restart every factory: `sudo systemctl
 
 `FACTORY_MACHINES` in `common.env` lists the machines that run agents, with a slot count each: `local=2 ssh://factory@linux-box=3`. `local` is the factory host. Without `FACTORY_MACHINES`, the list is `local` with `FACTORY_SLOTS` slots. A bad list stops each factory at its start.
 
-Each run picks one machine at its start and keeps it to the end, because its volumes stay on that machine. The pick takes the machine whose runs hold the smallest share of its slots, and counts runs that only prepare. A machine with 0 slots gets no new runs, and its runs finish there. An agent waits for a free slot on its own machine. On a worker machine, an agent carries the label `factory.machine`, a failure message names the machine, and the agent sends no traces.
+Each run picks one machine at its start and keeps it to the end, because its volumes stay on that machine. The pick takes the machine whose runs hold the smallest share of its slots, and counts runs that only prepare. A machine that does not answer gets no new runs. A machine with 0 slots gets no new runs either, and its runs finish there, one agent at a time. To take a machine out of the list, set its slots to 0 first and wait until its runs end. An agent waits for a free slot on its own machine. A run whose machine does not answer fails. It never moves to another machine.
+
+Every agent carries the label `factory.machine`: `local` or the host name. On a worker machine, a failure message of the agent names the machine, and the agent sends no traces.
 
 To prepare a worker machine, run this on it as your own user. It refuses Docker Desktop, because the firewall rules cannot apply inside its VM.
 

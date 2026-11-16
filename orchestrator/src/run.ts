@@ -283,9 +283,10 @@ function slotLock<T>(fn: () => Promise<T>): Promise<T> {
  */
 export async function placeRun(step: Step, runId: string): Promise<void> {
   for (let i = 0; ; i++) {
-    const machine = await step.run(`place-${i}`, () => slotLock(() => docker.place(runId))
-      .catch((e) => { if (e instanceof LockTimeout) return null; throw e; }));
-    if (machine) return;
+    const machine = (await step.run(`place-${i}`, () => slotLock(() => docker.place(runId))
+      .catch((e) => { if (e instanceof LockTimeout) return null; throw e; }))) as string | null;
+    // On a replay this is the stored result. Every later step of this invocation uses it.
+    if (machine) return docker.remember(runId, machine);
     if (i >= 120) throw new Error("No machine had a slot for 2 hours. Check the slot counts in FACTORY_MACHINES.");
     await step.sleep(`wait-place-${i}`, "1m");
   }
