@@ -12,6 +12,9 @@ const LIMITS = [
   "--cpus", process.env.RUNNER_CPUS ?? "4",
   "--memory", process.env.RUNNER_MEMORY ?? "8g",
   "--pids-limit", "2048",
+  // An init as process 1 reaps orphans. Without it, a finished background job stays a zombie, and an agent that
+  // waits with `while kill -0 $pid` waits until the container is stopped.
+  "--init",
   "--security-opt", "no-new-privileges",
   "--cap-drop", "ALL",
   // Public resolvers: the run network may not reach LAN addresses, and a home router is usually the host's DNS.
@@ -47,7 +50,7 @@ export const repoLabel = () => `factory.repo=${(process.env.GITHUB_REPO ?? "").t
 
 // The activity line `sf` reads: one JSON object per hook event on the container's stdout. "sf":1 comes first.
 // Hook stderr stays inside Claude Code, so the hook writes to process 1's stdout, which is the `docker logs` stream.
-// check: tested with the image's jq and no --init (process 1 is the start script). Not tested with the OTel variables set.
+// With --init, process 1 is docker-init, which holds the same stdout. Not tested with the OTel variables set.
 // A hook never fails a tool call (exit 2 from PreToolUse would block it): jq and write errors are dropped, exit is 0.
 // PostToolUseFailure and PermissionDenied close a call that PostToolUse never reports. Inputs, `tool_use_id` and
 // `duration_ms` as stated on https://code.claude.com/docs/en/hooks, read on 2026-11-13.
