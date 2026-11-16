@@ -1,7 +1,7 @@
 import { cron } from "inngest";
 import { inngest, ev } from "../inngest.ts";
 import * as docker from "../docker.ts";
-import { cloneScript, gh, ghToken, owner, pushCommits, repo, runAgent, setupScript } from "../run.ts";
+import { cloneScript, gh, ghToken, owner, placeRun, pushCommits, repo, runAgent, setupScript } from "../run.ts";
 
 // The course's lint ratchet (lesson 08-05): fix ONE failing instance per run, as a PR for a human.
 // The project owns two npm scripts:
@@ -64,6 +64,7 @@ export const lintRatchet = inngest.createFunction(
     if (taken.length >= MAX_OPEN) return { skipped: `${taken.length} open ratchet PRs (limit ${MAX_OPEN})` };
 
     try {
+      await placeRun(step, runId); // first: every container of this run goes to the machine it picks
       await step.run("prepare", () => docker.oneShot(runId, cloneScript(`git checkout -b ${branch}`), ghToken()));
       await step.run("setup", () => docker.oneShot(runId, setupScript));
       const target = ((await step.run("pick", () => docker.oneShot(runId, pickScript(taken)))) as string).trim();

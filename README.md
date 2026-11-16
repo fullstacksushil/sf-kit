@@ -23,6 +23,7 @@ flowchart LR
 | `herdr-plugin/` | An optional [herdr](https://herdr.dev) plugin. It lets you pick a running agent and follow it in a herdr pane. |
 | `init-host.sh` | Prepares a VPS or laptop once. It installs Inngest, Postgres, Redis, optional Phoenix, the run network, firewall rules, the runner image and the template unit for the factories. It writes the shared env file and starts no factory. It never overwrites secrets. |
 | `setup-wizard.sh` | Run it after `init-host.sh`, once for each repo. Each run adds or edits one factory. It asks for the repo, the factory name, the GitHub token, the port, the firewall rule, the start, and webhook or polling. The first run also asks for the Claude token and optional Langfuse keys. It checks each value. |
+| `init-worker.sh` | Makes a machine a worker machine. A worker machine runs agent containers for a factory host and holds no factory config. The script adds a worker user that accepts the factory host's ssh key, the run network with the firewall rules, and the runner image. See [Worker machines](#worker-machines). |
 | `init-project.sh` | Makes a project ready for the factory. It adds the agent guide files, the tracker doc, the skills and the agent scripts. It never overwrites a file. |
 | `orchestrator/` | The Node app. It turns GitHub events into Inngest events. Its functions run the agent tasks in Docker. |
 | `host/` | The compose file, the runner Dockerfile, the Caddyfile, the firewall script with its unit `factory-firewall.service`, and the systemd template unit `factory-orchestrator@.service`. `init-host.sh` installs them, except the Caddyfile. The firewall unit adds the rules of the run network at each boot, and no factory starts without it. The Caddyfile has a webhook site and two dashboard sites behind basic auth. |
@@ -49,7 +50,7 @@ cd ~/code/my-app && sf idea "<what you want to build>"
 
 Each init script prints its next steps at the end.
 
-Run `init-host.sh` as your own user, without `sudo`. The script calls `sudo` for the steps that need it. The factory services run as the user who runs the script. With `sudo` that user is `root`, and then no agent run starts: the service cannot open the slot lock `/tmp/factory-slots.flock` that your user owns. The script stops with a message when you run it with `sudo`. To deploy a new version of the kit, run `./init-host.sh` again, then restart each factory with `sudo systemctl restart factory-orchestrator@<name>`.
+Run `init-host.sh` as your own user, without `sudo`. The script calls `sudo` for the steps that need it. The factory services run as the user who runs the script. With `sudo` that user is `root`, and then no agent run starts: the service cannot open the slot locks `/tmp/factory-slots-*.flock` that your user owns. The script stops with a message when you run it with `sudo`. To deploy a new version of the kit, run `./init-host.sh` again, then restart each factory with `sudo systemctl restart factory-orchestrator@<name>`.
 
 `sf new` makes a React Router, TypeScript and Vitest app, the stack the agent prompts expect. It adds the agent files and the scripts the agents run: `npm run check` (types, then tests) and `npm run build`. It runs both and makes the first commit. Then it asks before it creates the private GitHub repo and the factory labels. At the end, it prints the `setup-wizard.sh --repo` command that adds a factory for the new repo.
 
@@ -70,6 +71,22 @@ One factory host runs one factory for each repo. All factories share one Inngest
 `sf` finds the factory whose `GITHUB_REPO` matches the git origin of the folder. If no factory serves the repo, `sf` offers to run the wizard. Set `ENV_DIR` to read the env files from a folder other than `/etc/factory`. Set `SF_ORCHESTRATOR_URL` and `SF_FACTORY` to use a factory on another machine.
 
 After an update of the orchestrator code, restart every factory: `sudo systemctl restart 'factory-orchestrator@*'`.
+
+### Worker machines
+
+`FACTORY_MACHINES` in `common.env` lists the machines that run agents, with a slot count each: `local=2 ssh://factory@linux-box=3`. `local` is the factory host. Without `FACTORY_MACHINES`, the list is `local` with `FACTORY_SLOTS` slots. A bad list stops each factory at its start.
+
+Each run picks one machine at its start and keeps it to the end, because its volumes stay on that machine. The pick takes the machine whose runs hold the smallest share of its slots, and counts runs that only prepare. A machine that does not answer gets no new runs. A machine with 0 slots gets no new runs either, and its runs finish there, one agent at a time. To take a machine out of the list, set its slots to 0 first and wait until its runs end. An agent waits for a free slot on its own machine. While the machine of a run does not answer, its agent counts as still running. That lasts up to the maximum run time, `RUN_MAX_MINUTES` (45 by default). Any other step of that run fails. A run never moves to another machine.
+
+An agent stops itself 5 minutes after the maximum run time, also on a laptop that the orchestrator could not reach for a while. Cleanup logs what it cannot remove. The orchestrator marks a machine for a sweep when it starts, and each time a call to the machine does not answer. The next pick that gets an answer from a marked machine sweeps it. The sweep removes the containers and volumes of runs that Inngest no longer runs or queues, if they are older than an hour. The mark stays while younger leftovers wait. The sweep removes nothing when Inngest does not say that its list of active runs is whole.
+
+Every agent carries the label `factory.machine`: `local` or the host name. On a worker machine, a failure message of the agent names the machine, and the agent sends no traces.
+
+To prepare a worker machine, run this on it as your own user. It refuses Docker Desktop, because the firewall rules cannot apply inside its VM.
+
+```bash
+./init-worker.sh --key "$(ssh <factory host> cat .ssh/id_ed25519.pub)" --dry-run
+```
 
 ### `sf` on another machine
 
@@ -276,7 +293,7 @@ Tested on 2026-11-16 with Caddy 2.11 and Chrome: Inngest answers 401 on `/dev`, 
 - A rebase stops when a workflow file has a conflict. A person resolves it, because the factory never pushes a workflow that an agent wrote.
 - Explore reads at most 100 labelled issues in one run. The rest keep `agent:explore` and wait for the next run.
 - All factories share the run network `factory-net`. An agent of one factory can reach a server that an agent of another factory started. Give each factory its own `RUNNER_NETWORK` before a factory serves a public repo.
-- `FACTORY_SLOTS` is one cap for the whole host, with no fair share. One factory can hold every slot. A run waits up to 2 hours for a slot.
+- The slots of a machine are one cap for every factory on it, with no fair share. One factory can hold every slot. A run waits up to 2 hours for a slot on its machine, even when another machine has a free slot.
 - A run container gets 4 CPUs and 8 GB of memory. Set `RUNNER_CPUS` and `RUNNER_MEMORY` in a factory env file to change the limits of that factory. Nothing checks that `FACTORY_SLOTS` runs fit in the memory of the host. When a run passes its limit, the kernel stops one process in the container, and the run fails with an unclear message.
 - To find the memory that a project needs, run its setup and its check in the runner image with `--memory <limit> --memory-swap <limit>`. The check must pass, and `/sys/fs/cgroup/memory.events` in the container must show `oom_kill 0`. Do not read `memory.peak` for this: it includes the file cache, and the file cache fills the limit.
 - The prototype task posts screenshots and a draft PR. It does not deploy a preview you can click. To try it, check out the PR and follow `prototypes/issue-<n>/README.md`.

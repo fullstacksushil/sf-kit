@@ -16,8 +16,9 @@ export const PRIVATE_DEPS = (process.env.RUN_PRIVATE_DEPS ?? "").split(/\s+/).fi
   if (!/^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/.test(d) || d.includes("..")) throw new Error(`RUN_PRIVATE_DEPS: not owner/repo: ${JSON.stringify(d)}`);
   return d;
 });
-const MAX_MINUTES = Number(process.env.RUN_MAX_MINUTES ?? 45);
-export const SLOTS = Number(process.env.FACTORY_SLOTS ?? 2);
+const { MAX_MINUTES } = docker;
+// The slots of every machine together: how many agents can run at once.
+export const TOTAL_SLOTS = docker.MACHINES.reduce((n, m) => n + m.slots, 0);
 
 /** The parts of Inngest's step tools that a run uses. */
 export type Step = {
@@ -243,10 +244,11 @@ export async function pushCommits(step: Step, runId: string, branch: string, opt
  * A child `flock` holds the lock until its stdin closes. The kernel drops the lock when that child or this
  * process dies, so a dead holder never blocks the others. The file's contents do not matter.
  */
-// ponytail: fn has no time limit, so a hung fn holds every factory's slot lock. The wait gives up after 5 minutes
+// fn has no limit of its own. Each docker call in it has one (10 s to list, 60 s else). slotLock keeps one lock per machine,
+// so a machine that stops answering mid-call holds only its own lock, for up to about 3 minutes. The wait gives up after 5 minutes
 // with a LockTimeout, and runAgent counts that as "no slot now".
 // Needs util-linux flock on the host, and every factory must run as the same user (sticky /tmp refuses others' files).
-export async function hostLock<T>(fn: () => Promise<T>, path = "/tmp/factory-slots.flock", waitSeconds = 300): Promise<T> {
+export async function hostLock<T>(fn: () => Promise<T>, path: string, waitSeconds = 300): Promise<T> {
   // -E 75: a timeout exits 75, apart from flock's own errors (1).
   const child = spawn("flock", ["-x", "-w", String(waitSeconds), "-E", "75", path, "sh", "-c", "echo held; exec cat"], { stdio: ["pipe", "pipe", "inherit"] });
   child.stdin.on("error", () => {});
@@ -266,13 +268,57 @@ export async function hostLock<T>(fn: () => Promise<T>, path = "/tmp/factory-slo
 
 export class LockTimeout extends Error {}
 
-let slotQueue: Promise<unknown> = Promise.resolve();
-/** Run fn after every earlier caller of this process, under the host lock that the other factories also take. */
-// ponytail: one host-wide cap with no fair share, so one factory can hold every slot. Add per-factory caps if that hurts.
-function slotLock<T>(fn: () => Promise<T>): Promise<T> {
-  const next = slotQueue.then(() => hostLock(fn), () => hostLock(fn));
-  slotQueue = next.catch(() => {});
+const slotQueues = new Map<string, Promise<unknown>>();
+/**
+ * Run fn after every earlier caller of this process with the same key, under the host lock of that key, which the
+ * other factories on this host also take. One key per machine for the agent start, and the key "pick" for the pick.
+ * So a machine that stops answering stalls only the starts on that machine, and the pick for at most its list limit.
+ */
+// ponytail: one cap per machine with no fair share, so one factory can hold every slot. Add per-factory caps if that hurts.
+export function slotLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const path = `/tmp/factory-slots-${key.replace(/[^A-Za-z0-9.-]/g, "_")}.flock`;
+  const next = (slotQueues.get(key) ?? Promise.resolve()).then(() => hostLock(fn, path), () => hostLock(fn, path));
+  slotQueues.set(key, next.catch(() => {}));
   return next;
+}
+
+/**
+ * The ids of every run that Inngest runs or queues, from every factory on this Inngest server. The sweep keeps their leftovers.
+ * Throws unless the list is surely whole: a run missing from it would lose its volumes.
+ */
+// check: the GraphQL shape was read from the live self-hosted Inngest on 2026-11-13 (see cli/sf.mjs): POST /v0/gql with no key,
+// runs(first, orderBy, filter: {from, status}). Not tested: the filter without appIDs, first: 500, and pageInfo.
+// A server without pageInfo answers with an error, and then nothing is swept.
+// The URL may hold a user and a password (basic auth). fetch refuses such a URL, so they go into a header, as in cli/sf.mjs.
+export async function activeRunIds(base = process.env.INNGEST_BASE_URL ?? "http://127.0.0.1:8288", fetchFn: typeof fetch = fetch): Promise<Set<string>> {
+  const url = new URL(base);
+  const auth: Record<string, string> = url.username ? { authorization: `Basic ${Buffer.from(`${decodeURIComponent(url.username)}:${decodeURIComponent(url.password)}`).toString("base64")}` } : {};
+  url.username = url.password = "";
+  const from = new Date(Date.now() - 365 * 86_400_000).toISOString();
+  const query = `query($from: Time!) { runs(first: 500, orderBy: [{field: QUEUED_AT, direction: DESC}], filter: {from: $from, status: [RUNNING, QUEUED]}) { edges { node { id } } pageInfo { hasNextPage } } }`;
+  const r = await fetchFn(`${url.href.replace(/\/$/, "")}/v0/gql`, {
+    method: "POST", headers: { "content-type": "application/json", ...auth }, body: JSON.stringify({ query, variables: { from } }), signal: AbortSignal.timeout(10_000),
+  });
+  const runs = ((await r.json()) as { data?: { runs?: { edges?: { node: { id: string } }[]; pageInfo?: { hasNextPage?: boolean } } } }).data?.runs;
+  if (!Array.isArray(runs?.edges)) throw new Error("Inngest gave no run list.");
+  if (runs.pageInfo?.hasNextPage !== false) throw new Error("Inngest did not say the run list is whole, so it may be cut.");
+  return new Set(runs.edges.map((e) => e.node.id));
+}
+
+/**
+ * Pick the run's machine and create its volumes there. The first step of each function that runs containers,
+ * inside the try whose finally cleans up, so the volumes never outlive the run.
+ * The pick never waits for a free slot: the start of the agent does. It waits only when no machine has any slots.
+ */
+export async function placeRun(step: Step, runId: string): Promise<void> {
+  for (let i = 0; ; i++) {
+    const machine = (await step.run(`place-${i}`, () => slotLock("pick", () => docker.place(runId))
+      .catch((e) => { if (e instanceof LockTimeout) return null; throw e; }))) as string | null;
+    // On a replay this is the stored result. Every later step of this invocation uses it.
+    if (machine) { docker.remember(runId, machine); void docker.sweepReady(runId, () => activeRunIds()); return; }
+    if (i >= 120) throw new Error("No machine had a slot for 2 hours. Check the slot counts in FACTORY_MACHINES.");
+    await step.sleep(`wait-place-${i}`, "1m");
+  }
 }
 
 /**
@@ -290,29 +336,25 @@ export async function runAgent(step: Step, runId: string, prepare: string | null
     await step.run(id("setup"), () => docker.oneShot(runId, setupScript));
   }
 
-  // Wait for a machine slot, then start. The in-process queue and the host lock make "count, then start" atomic
-  // across every factory on the host: two runs cannot both take the last slot.
+  // Wait for a slot on the run's machine, then start. The in-process queue and the host lock make "count, then start"
+  // atomic across every factory on the host: two runs cannot both take the last slot.
   for (let i = 0; ; i++) {
-    const started = (await step.run(id(`start-agent-${i}`), () => slotLock(async () => {
-      if (await docker.agentExists(agent)) return true; // a retry of this step after the start succeeded
-      if ((await docker.runningAgents()) >= SLOTS) return false;
-      await docker.startAgent(runId, agentScript, docker.agentEnv(runId), subject, agent);
-      return true;
-    }).catch((e) => { if (e instanceof LockTimeout) return false; throw e; }))) as boolean;
+    const started = (await step.run(id(`start-agent-${i}`), async () => slotLock(await docker.machineOf(runId), () => docker.startIfFree(runId, agentScript, subject, agent))
+      .catch((e) => { if (e instanceof LockTimeout) return false; throw e; }))) as boolean;
     if (started) break;
-    if (i >= 120) throw new Error(`No free machine slot for 2 hours (FACTORY_SLOTS=${SLOTS}).`);
+    if (i >= 120) throw new Error(`No free slot on the run's machine for 2 hours${await docker.failureNote(runId)}. Check FACTORY_MACHINES.`);
     await step.sleep(id(`wait-slot-${i}`), "1m");
   }
 
   let code: number | null = null;
   for (let i = 0; i < MAX_MINUTES && code === null; i++) {
     await step.sleep(id(`wait-${i}`), "1m");
-    code = (await step.run(id(`check-${i}`), () => docker.agentExitCode(agent))) as number | null;
+    code = (await step.run(id(`check-${i}`), () => docker.agentExitCode(runId, agent))) as number | null;
   }
-  if (code === null) throw new Error(`The agent ran longer than ${MAX_MINUTES} minutes.`);
+  if (code === null) throw new Error(`The agent ran longer than ${MAX_MINUTES} minutes${await docker.failureNote(runId)}.`);
   if (code !== 0) {
-    const tail = (await step.run(id("read-log"), () => docker.agentLogTail(agent))) as string;
-    throw new Error(`The agent exited with code ${code}.${tail ? ` Its last output:\n\n\`\`\`\n${tail}\n\`\`\`\n` : ""}`);
+    const tail = (await step.run(id("read-log"), () => docker.agentLogTail(runId, agent))) as string;
+    throw new Error(`The agent exited with code ${code}${await docker.failureNote(runId)}.${tail ? ` Its last output:\n\n\`\`\`\n${tail}\n\`\`\`\n` : ""}`);
   }
 }
 

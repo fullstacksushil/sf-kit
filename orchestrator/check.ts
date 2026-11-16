@@ -221,3 +221,219 @@ console.log("multi-factory checks ok");
   assert.ok(tailForMessage("x".repeat(5000)).length === 600 && tailForMessage("") === "");
 }
 console.log("activity hook checks ok");
+
+{ // Machines: FACTORY_MACHINES lists where agents run, with a slot count each. Without it: local with FACTORY_SLOTS.
+  const { parseMachines } = await import("./src/docker.ts");
+  assert.deepEqual(parseMachines(undefined, "3"), [{ target: "local", slots: 3 }]);
+  assert.deepEqual(parseMachines(undefined, undefined), [{ target: "local", slots: 2 }]);
+  assert.deepEqual(parseMachines(" ", "3"), [{ target: "local", slots: 3 }], "an empty FACTORY_MACHINES= line means not set");
+  assert.throws(() => parseMachines(undefined, "abc"), /FACTORY_SLOTS/);
+  assert.deepEqual(parseMachines(" local=2  ssh://factory@linux-box=3 ssh://f@mac-mini.tail1.ts.net:2222=0 ", "9"),
+    [{ target: "local", slots: 2 }, { target: "ssh://factory@linux-box", slots: 3 }, { target: "ssh://f@mac-mini.tail1.ts.net:2222", slots: 0 }]);
+  for (const bad of ["local", "local=", "local=x", "local=-1", "local=1.5", "http://h=2", "ssh://h=1", "ssh://u@h;id=1", "ssh://-oProxyCommand=x@h=1", "local=1 local=2", "abc", "x=1 y"])
+    assert.throws(() => parseMachines(bad, "2"), /FACTORY_MACHINES/, JSON.stringify(bad));
+  process.env.FACTORY_MACHINES = "local=1 ssh://u@h;id=1";
+  await assert.rejects(import("./src/docker.ts?badmachines"), /FACTORY_MACHINES/, "a bad list stops the orchestrator at start");
+  process.env.FACTORY_MACHINES = "ssh://u@h=2 ssh://u@g=3";
+  // A fresh process: run.ts reads MACHINES from docker.ts, which this process already loaded.
+  const workersOnly = spawnSync(process.execPath, ["--import", "tsx", "-e", 'import("./src/run.ts").then((r) => console.log(r.TOTAL_SLOTS))'], { env: { ...process.env }, encoding: "utf8", timeout: 20000 });
+  assert.equal(workersOnly.stdout.trim(), "5", "a list without local works, and the slots add up");
+  delete process.env.FACTORY_MACHINES;
+}
+{ // Every docker call goes to its machine: DOCKER_HOST for a remote one, the process env for local. Every call has a timeout.
+  const { dockerCall, runningAgents } = await import("./src/docker.ts");
+  const { writeFileSync, chmodSync } = await import("node:fs");
+  const dir = mkdtempSync(`${tmpdir()}/sf-machine-`);
+  writeFileSync(`${dir}/docker`, `#!/bin/sh\necho "\${DOCKER_HOST:-none} $*" >> "${dir}/log"\n[ "$1" = hang ] && exec sleep 5\n[ "$1" = ps ] && printf 'a\\nb\\n'\nexit 0\n`);
+  chmodSync(`${dir}/docker`, 0o755);
+  const path = process.env.PATH;
+  process.env.PATH = `${dir}:${path}`;
+  try {
+    await dockerCall("local", ["info"]);
+    await dockerCall("ssh://factory@linux-box", ["info"]);
+    assert.equal(await runningAgents("ssh://factory@linux-box"), 2);
+    assert.equal(await runningAgents("local"), 2);
+    assert.deepEqual(readFileSync(`${dir}/log`, "utf8").trim().split("\n"), [
+      "none info", "ssh://factory@linux-box info",
+      "ssh://factory@linux-box ps -q --filter name=^agent-", "none ps -q --filter name=^agent-"]);
+    const t = Date.now();
+    await assert.rejects(dockerCall("local", ["hang"], { timeout: 300 }), /timed out after 300 ms/);
+    assert.ok(Date.now() - t < 3000, "the timeout ends a hung call");
+  } finally { process.env.PATH = path; }
+}
+{ // Placement: a run's volumes live on one machine and record where the run is. Every call of the run goes there.
+  const { place, findRun, oneShot, cleanup, startIfFree, agentExitCode, failureNote, remember, sweep, takeReadyToSweep, sweepReady } = await import("./src/docker.ts");
+  const { writeFileSync, chmodSync, readdirSync: ls, rmSync, mkdirSync } = await import("node:fs");
+  const dir = mkdtempSync(`${tmpdir()}/sf-place-`);
+  // A fake docker with state per DOCKER_HOST. A volume or container is a file that holds "<run> <created> <name>".
+  // A machine named *down*, or one with a file in off/, does not answer.
+  writeFileSync(`${dir}/docker`, `#!/bin/sh
+h=$(printf %s "\${DOCKER_HOST:-local}" | tr -c 'A-Za-z0-9' _); d="${dir}/m/$h"; mkdir -p "$d/vol" "$d/agents"
+case "\${DOCKER_HOST:-}" in *down*) echo "ssh: connect to host down: No route to host" >&2; exit 255 ;; esac
+[ -e "${dir}/off/$h" ] && { echo "error during connect: ssh: connect to host: Connection timed out" >&2; exit 255; }
+echo "\${DOCKER_HOST:-local} $*" | tr "\\n" " " >> "${dir}/log"; echo >> "${dir}/log"
+labels() { run=-; at=0; while [ $# -gt 0 ]; do case "$1" in --label) case "$2" in factory.run=*) run="\${2#factory.run=}" ;; factory.created=*) at="\${2#factory.created=}" ;; esac ;; esac; shift; done; }
+case "$1 $2" in
+  "volume create") for a in "$@"; do last="$a"; done; labels "$@"; echo "$run $at $last" > "$d/vol/$last" ;;
+  "volume ls") case "$*" in *factory.run*) cat "$d"/vol/* 2>/dev/null ;; *) ls "$d/vol" ;; esac ;;
+  "volume rm") shift 3; for v in "$@"; do rm -f "$d/vol/$v"; done ;;
+  "ps -q") ls "$d/agents" ;;
+  "ps -a") cat "$d"/agents/* 2>/dev/null | grep -v '^- ' ;;
+  "ps -aq") case "$4" in
+      label=factory.run=*) id="\${4#label=factory.run=}"; for f in "$d"/agents/*; do [ -e "$f" ] && read -r run at n < "$f" && [ "$run" = "$id" ] && echo "$n"; done ;;
+      name=*) n="\${4#name=^}"; n="\${n%$}"; for f in "$d"/agents/"$n"*; do [ -e "$f" ] && basename "$f"; done ;;
+    esac ;;
+  "rm -f") shift 2; for c in "$@"; do rm -f "$d/agents/$c"; done ;;
+  "run -d") labels "$@"; echo "$run $at $4" > "$d/agents/$4" ;;
+  "inspect -f") case "$4" in *gone*) echo "Error: No such object: $4" >&2; exit 1 ;; esac; echo "exited 0" ;;
+esac
+exit 0
+`);
+  chmodSync(`${dir}/docker`, 0o755);
+  const path = process.env.PATH;
+  process.env.PATH = `${dir}:${path}`;
+  const machines = [{ target: "local", slots: 1 }, { target: "ssh://f@b", slots: 2 }, { target: "ssh://f@c", slots: 0 }];
+  const log = () => readFileSync(`${dir}/log`, "utf8").trim().split("\n").map((l) => l.trim());
+  try {
+    assert.equal(await place("r1", machines), "ssh://f@b", "no load anywhere: the machine with the most slots");
+    assert.equal(await place("r2", machines), "local", "b holds 1 of 2, local 0 of 1");
+    assert.equal(await place("r3", machines), "ssh://f@b", "local holds 1 of 1, b 1 of 2");
+    assert.equal(await place("r1", machines), "ssh://f@b", "a retry keeps the run's machine");
+    assert.equal(log().filter((l) => /volume create .*run-r1-work$/.test(l)).length, 1, "a retry creates no second volume");
+    assert.ok(log().some((l) => l.startsWith("ssh://f@b volume create --label factory.repo=")), "the volumes carry the repo label");
+    assert.equal(await place("r4", [{ target: "local", slots: 0 }]), null, "no machine with a slot: no place");
+    assert.deepEqual(ls(`${dir}/m/ssh___f_c/vol`), [], "a machine with 0 slots gets no volume");
+    // After a restart the orchestrator has no memory. The volumes still say where each run is.
+    assert.equal(await findRun("r2", machines), "local");
+    assert.equal(await findRun("r3", machines), "ssh://f@b");
+    assert.equal(await findRun("nope", machines), undefined);
+
+    // Every call of r3 goes to b: one-shot steps, the agent start, the exit check, the cleanup.
+    const before = log().length;
+    process.env.OTEL_TRACES_ENDPOINT = "http://phoenix:6006/v1/traces";
+    await oneShot("r3", "true");
+    assert.equal(await startIfFree("r3", "true", "issue #3", "r3", machines), true);
+    assert.equal(await startIfFree("r3", "true", "issue #3", "r3", machines), true, "a retry after the start: still started");
+    delete process.env.OTEL_TRACES_ENDPOINT;
+    assert.equal(await agentExitCode("r3", "r3"), 0);
+    await cleanup("r3");
+    const r3calls = log().slice(before);
+    assert.ok(r3calls.length >= 5 && r3calls.every((l) => l.startsWith("ssh://f@b ")), r3calls.join("\n"));
+    assert.ok(r3calls.some((l) => l.includes("--label factory.machine=b")), "the agent carries its machine");
+    assert.ok(!r3calls.some((l) => l.includes("OTEL_")), "no trace settings go to a worker machine");
+    assert.ok(r3calls.some((l) => l.includes("-e CLAUDE_CODE_OAUTH_TOKEN")), "the model token goes to the agent");
+    assert.ok(!ls(`${dir}/m/ssh___f_b/vol`).some((v) => v.startsWith("run-r3-")), "cleanup removes the volumes on b");
+
+    // The start step checks the slots of the run's own machine. local has 1 slot.
+    writeFileSync(`${dir}/m/local/agents/agent-other`, "");
+    assert.equal(await startIfFree("r2", "true", "issue #2", "r2", machines), false, "local is full");
+    // A failure on a worker machine names it. On local, the message stays as it was.
+    assert.equal(await failureNote("r1"), " (on b)");
+    assert.equal(await failureNote("r2"), "");
+
+    // A machine that does not answer is left out of the pick. It never counts as an empty machine.
+    const withDown = [{ target: "ssh://f@down", slots: 5 }, ...machines];
+    assert.equal(await place("r5", withDown), "ssh://f@b", "the down machine has the most slots and no known load");
+    // Finding a run: a hit counts even when another machine is down. No hit while a machine is down is an error,
+    // because the run may be on that machine. Only a run that no machine holds is "not placed".
+    assert.equal(await findRun("r5", withDown), "ssh://f@b");
+    await assert.rejects(findRun("r-lost", withDown), /down did not answer/);
+    assert.equal(await findRun("r-lost", machines), undefined);
+    // The pick's step result is what later steps use, also after a restart, without asking any machine.
+    remember("r6", "ssh://f@down");
+    await assert.rejects(oneShot("r6", "true"), /No route to host/, "a run on a down machine fails, it does not move to local");
+
+    // A drained machine (0 slots) still lets the runs it holds start their agents, one at a time.
+    const drained = [{ target: "local", slots: 1 }, { target: "ssh://f@b", slots: 0 }];
+    for (const a of ls(`${dir}/m/ssh___f_b/agents`)) rmSync(`${dir}/m/ssh___f_b/agents/${a}`);
+    assert.equal(await startIfFree("r5", "true", "issue #5", "r5", drained), true, "its run finishes there");
+    assert.equal(await startIfFree("r1", "true", "issue #1", "r1", drained), false, "one agent at a time");
+
+    // The exit check: a lost connection means "still running". A real docker error still fails the step.
+    assert.equal(await agentExitCode("r6", "r6"), null, "the machine of r6 does not answer");
+    remember("rg", "ssh://f@b");
+    await assert.rejects(agentExitCode("rg", "gone"), /No such object/);
+    // The agent stops itself after the maximum run time, also when no one checks it any more.
+    assert.ok(log().some((l) => /factory-runner:latest timeout --kill-after=1m 50m bash -c /.test(l)), "the agent runs under timeout, 5 minutes past the last check");
+    // Cleanup on a machine that does not answer logs it and goes on. The sweep removes the leftovers later.
+    const warn = console.warn; const warned: string[] = []; console.warn = (m: string) => warned.push(m);
+    try { await cleanup("r6"); } finally { console.warn = warn; }
+    assert.ok(warned.some((m) => /r6/.test(m) && /down/.test(m)), warned.join("\n"));
+
+    // Cleanup also stops the one-shot containers of the run, found by their run label.
+    const sm = "ssh://f@s", only = [{ target: sm, slots: 3 }];
+    mkdirSync(`${dir}/m/ssh___f_s/agents`, { recursive: true });
+    writeFileSync(`${dir}/m/ssh___f_s/agents/oneshot1`, "rk 1 oneshot1\n");
+    remember("rk", sm);
+    await cleanup("rk");
+    assert.ok(!ls(`${dir}/m/ssh___f_s/agents`).includes("oneshot1"), "the run's one-shot container is gone");
+
+    // The sweep: containers and volumes of runs that Inngest no longer runs, older than an hour.
+    for (const id of ["keep", "stale", "young"]) assert.equal(await place(id, only), sm);
+    assert.equal(await startIfFree("stale", "true", "issue #9", "stale", only), true);
+    assert.deepEqual(await sweep(sm, new Set(["keep"])), { removed: [], young: true }, "nothing is an hour old yet");
+    const later = Date.now() + 2 * 3600_000;
+    const { removed } = await sweep(sm, new Set(["keep"]), later);
+    assert.deepEqual(removed.sort(), ["agent-stale", "run-stale-tmp", "run-stale-work", "run-young-tmp", "run-young-work"]);
+    assert.deepEqual(ls(`${dir}/m/ssh___f_s/vol`).sort(), ["run-keep-tmp", "run-keep-work"], "an active run keeps its volumes");
+
+    // A machine that answers after a call to it did not answer is ready for a sweep, once.
+    const flaky = [{ target: "ssh://f@flaky", slots: 1 }];
+    mkdirSync(`${dir}/off`, { recursive: true }); writeFileSync(`${dir}/off/ssh___f_flaky`, "");
+    assert.equal(await place("rf", flaky), null);
+    takeReadyToSweep();
+    rmSync(`${dir}/off/ssh___f_flaky`);
+    assert.equal(await place("rf", flaky), "ssh://f@flaky");
+    assert.deepEqual(takeReadyToSweep(), ["ssh://f@flaky"]);
+    assert.deepEqual(takeReadyToSweep(), [], "once");
+
+    // The gate: no sweep when Inngest does not list the run that asks for it. The machine stays marked.
+    const fl = "ssh://f@flaky", off = () => writeFileSync(`${dir}/off/ssh___f_flaky`, ""), on = () => rmSync(`${dir}/off/ssh___f_flaky`);
+    off(); await place("x1", flaky); on();
+    assert.equal(await place("rf3", flaky), fl);
+    const rms = () => log().filter((l) => l.startsWith(`${fl} rm `) || l.startsWith(`${fl} volume rm `)).length;
+    await sweepReady("rf3", async () => new Set(["other"]));
+    assert.equal(rms(), 0, "the gate refused, nothing removed");
+    // Through the gate: leftovers younger than an hour stay, and so does the mark, so a later pick sweeps again.
+    assert.equal(await place("rf4", flaky), fl);
+    await sweepReady("rf3", async () => new Set(["rf3"]));
+    assert.ok(ls(`${dir}/m/ssh___f_flaky/vol`).includes("run-rf4-work"), "a young leftover stays");
+    await place("rf5", flaky);
+    assert.deepEqual(takeReadyToSweep(), [fl], "still marked while young leftovers wait");
+    // A cleanup or an exit check that cannot reach the machine marks it for a sweep.
+    remember("rc", fl); off();
+    assert.equal(await agentExitCode("rc", "rc"), null);
+    on(); await place("rc2", flaky);
+    assert.deepEqual(takeReadyToSweep(), [fl], "the exit check marked the machine");
+    off();
+    await cleanup("rc");
+    on(); await place("rc3", flaky);
+    assert.deepEqual(takeReadyToSweep(), [fl], "the failed cleanup marked the machine");
+  } finally { process.env.PATH = path; }
+}
+{ // The list of active runs that gates the sweep. A cut list must never pass: the runs it leaves out would be swept.
+  const { activeRunIds } = await import("./src/run.ts");
+  const calls: { url: string; auth?: string }[] = [];
+  const answer = (body: unknown) => (async (url: string, init: { headers: Record<string, string> }) => {
+    calls.push({ url, auth: init.headers.authorization });
+    return { json: async () => body };
+  }) as unknown as typeof fetch;
+  const page = (ids: string[], hasNextPage: boolean) => ({ data: { runs: { edges: ids.map((id) => ({ node: { id } })), pageInfo: { hasNextPage } } } });
+  assert.deepEqual(await activeRunIds("http://op:p%2Fw@127.0.0.1:8288/", answer(page(["a", "b"], false))), new Set(["a", "b"]));
+  assert.deepEqual(calls[0], { url: "http://127.0.0.1:8288/v0/gql", auth: `Basic ${Buffer.from("op:p/w").toString("base64")}` }, "the password goes in a header");
+  await assert.rejects(activeRunIds("http://127.0.0.1:8288", answer(page(["a"], true))), /cut/);
+  await assert.rejects(activeRunIds("http://127.0.0.1:8288", answer(page(["a"], undefined as unknown as boolean))), /cut/, "no page info: maybe cut");
+  await assert.rejects(activeRunIds("http://127.0.0.1:8288", answer({ errors: [{ message: "no field" }] })), /no run list/);
+}
+{ // One lock per machine, and one for the pick. A machine that hangs stalls only its own starts.
+  const { slotLock } = await import("./src/run.ts");
+  const timer = (ms: number) => new Promise((r) => setTimeout(() => r("timeout"), ms));
+  let release!: () => void;
+  const held = slotLock("ssh://f@a", () => new Promise<void>((r) => (release = r)));
+  await new Promise((r) => setTimeout(r, 200));
+  assert.equal(await Promise.race([slotLock("ssh://f@b", async () => 7), timer(3000)]), 7, "b does not wait for a");
+  assert.equal(await Promise.race([slotLock("pick", async () => 8), timer(3000)]), 8, "the pick does not wait for a");
+  assert.equal(await Promise.race([slotLock("ssh://f@a", async () => 9), timer(500)]), "timeout", "a waits for a");
+  release(); await held;
+}
+console.log("machine checks ok");

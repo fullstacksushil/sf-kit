@@ -1,6 +1,6 @@
 import { inngest, ev } from "../inngest.ts";
 import * as docker from "../docker.ts";
-import { agentFiles, cloneScript, gh, ghToken, issueNumber, owner, openFactoryPr, pushCommits, repo, resetOnFailure, runAgent, statusTag, ticketScript } from "../run.ts";
+import { agentFiles, cloneScript, gh, ghToken, issueNumber, openFactoryPr, owner, placeRun, pushCommits, repo, resetOnFailure, runAgent, statusTag, ticketScript } from "../run.ts";
 
 export const implementTicket = inngest.createFunction(
   {
@@ -36,6 +36,7 @@ export const implementTicket = inngest.createFunction(
     });
 
     try {
+      await placeRun(step, runId); // first: every container of this run goes to the machine it picks
       await runAgent(
         step,
         runId,

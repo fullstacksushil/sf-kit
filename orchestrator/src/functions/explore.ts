@@ -1,6 +1,6 @@
 import { inngest, ev } from "../inngest.ts";
 import * as docker from "../docker.ts";
-import { agentFiles, cloneScript, gh, ghToken, issueCheckFn, owner, repo, runAgent, statusTag } from "../run.ts";
+import { agentFiles, cloneScript, gh, ghToken, issueCheckFn, owner, placeRun, repo, runAgent, statusTag } from "../run.ts";
 
 // The course's agent-explore.yml as one Inngest function. The agent reads every open
 // `agent:explore` issue as one batch and returns a plan. It holds no GitHub token.
@@ -59,6 +59,7 @@ export const exploreBatch = inngest.createFunction(
     let batch: number[] = [];
     const applied = new Set<number>(); // issues apply has handed on. Steps replay on resume, so this is rebuilt each time.
     try {
+      await placeRun(step, runId); // first: every container of this run goes to the machine it picks
       const listed = JSON.parse((await step.run("list-batch", () => docker.oneShot(runId, listScript, ghToken()))) as string) as { batch: number[]; refused: number[] };
       // A refused issue loses agent:explore, so it does not wait forever and the poll does not start empty runs.
       await step.run("refuse-issues", async () => {

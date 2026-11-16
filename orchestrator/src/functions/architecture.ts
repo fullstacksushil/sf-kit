@@ -1,7 +1,7 @@
 import { cron } from "inngest";
 import { inngest, ev } from "../inngest.ts";
 import * as docker from "../docker.ts";
-import { cloneScript, gh, ghToken, owner, promptAgent, repo, runAgent } from "../run.ts";
+import { cloneScript, gh, ghToken, owner, placeRun, promptAgent, repo, runAgent } from "../run.ts";
 
 // The course's architecture loop (lesson 08-04, first design): every two days a runner runs the
 // improve-codebase-architecture analysis, and each candidate becomes one ticket labelled `architecture`.
@@ -42,6 +42,7 @@ export const architectureReview = inngest.createFunction(
     if (open >= STOP_AT) return { skipped: `${open} open ${LABEL} tickets (limit ${STOP_AT})` };
 
     try {
+      await placeRun(step, runId); // first: every container of this run goes to the machine it picks
       await runAgent(step, runId,
         `gh issue list --repo ${owner}/${repo} --label ${LABEL} --state all --limit 500 --json title,state > /tmp/arch-existing.json\n` + cloneScript(""),
         `cat > /tmp/arch-prompt.md <<'SF_PROMPT'\n${prompt}\nSF_PROMPT\n${promptAgent("/tmp/arch-prompt.md")}`,

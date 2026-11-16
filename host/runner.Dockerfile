@@ -24,11 +24,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # rtk shortens the output of shell commands (git, npm, grep, ls) before the agent reads it, through a Claude Code
 # hook that orchestrator/src/docker.ts adds. The Apache-2.0 edition: the hook and the filters, no engine.
-# A new version: update both values from the release's checksums.txt.
+# A new version: update the three values from the release's checksums.txt.
+# Checksums read on 2026-11-16 from https://github.com/rtk-ai/rtk/releases/download/v1.2.0/checksums.txt
+# The image's own architecture picks the download, so the image builds on amd64 (EC2) and arm64 (a Mac mini VM).
 ARG RTK_VERSION=1.2.0
-ARG RTK_SHA256=a28407dc13038bdc9c2a1f5a047b0c636e0c1d495b15523576e2adb992a06a17
-RUN curl -fsSL -o /tmp/rtk.tgz "https://github.com/rtk-ai/rtk/releases/download/v${RTK_VERSION}/rtk-oss-x86_64-unknown-linux-musl.tar.gz" \
-  && echo "${RTK_SHA256}  /tmp/rtk.tgz" | sha256sum -c - \
+ARG RTK_SHA256_AMD64=a28407dc13038bdc9c2a1f5a047b0c636e0c1d495b15523576e2adb992a06a17
+ARG RTK_SHA256_ARM64=9786c61dbbea704e1468ee7060930d3b45b67f79ba2babfb73463e85340628d9
+RUN case "$(dpkg --print-architecture)" in \
+      amd64) arch=x86_64 sum="${RTK_SHA256_AMD64}" ;; \
+      arm64) arch=aarch64 sum="${RTK_SHA256_ARM64}" ;; \
+      *) echo "rtk: no build for $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac \
+  && curl -fsSL -o /tmp/rtk.tgz "https://github.com/rtk-ai/rtk/releases/download/v${RTK_VERSION}/rtk-oss-${arch}-unknown-linux-musl.tar.gz" \
+  && echo "${sum}  /tmp/rtk.tgz" | sha256sum -c - \
   && tar xzf /tmp/rtk.tgz -C /usr/local/bin rtk && rm /tmp/rtk.tgz
 # rtk looks for the hook that `rtk init -g` writes. docker.ts adds the hook its own way, so rtk would tell the agent,
 # in the output of its first command, that no hook is installed.

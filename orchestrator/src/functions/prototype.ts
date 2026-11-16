@@ -1,7 +1,7 @@
 import { inngest, ev } from "../inngest.ts";
 import * as docker from "../docker.ts";
 import {
-  agentFiles, cloneScript, gh, ghToken, issueNumber, owner, promptAgent, pushCommits, repo, resetOnFailure, runAgent, statusTag, ticketScript,
+  agentFiles, cloneScript, gh, ghToken, issueNumber, owner, placeRun, promptAgent, pushCommits, repo, resetOnFailure, runAgent, statusTag, ticketScript,
 } from "../run.ts";
 
 // The course's prototype task (lesson 08-08). A throwaway prototype that people react to, not production code.
@@ -43,6 +43,7 @@ export const prototypeIssue = inngest.createFunction(
     })) as number;
 
     try {
+      await placeRun(step, runId); // first: every container of this run goes to the machine it picks
       // An existing prototype branch is updated, so each version builds on the last.
       await runAgent(step, runId,
         ticketScript(n) + cloneScript(`
