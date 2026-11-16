@@ -48,6 +48,8 @@ os="$(docker info -f '{{.OperatingSystem}}' 2>/dev/null)" || die "Docker does no
 # Docker Desktop runs containers in its own VM, where the host's iptables rules do not apply.
 [[ "$os" != *"Docker Desktop"* ]] || die "Docker Desktop runs containers in a VM, so the factory firewall cannot apply.
 Run Docker in a Linux VM that you control (colima or OrbStack), then run this script inside that VM."
+# sudo first, on its own: without it the chain check below cannot tell "no chain" from "no sudo".
+sudo -v || die "sudo did not work. Run this script in a terminal where sudo can ask for your password."
 sudo iptables -nL DOCKER-USER >/dev/null 2>&1 || die "No iptables chain DOCKER-USER. The factory firewall needs Docker's iptables rules on Linux.
 On macOS, run Docker in a Linux VM (colima or OrbStack) and run this script inside it."
 

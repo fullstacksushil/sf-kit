@@ -3,7 +3,7 @@
 # iptables come first on PATH. The fake sudo runs its command, so the fakes answer for root too.
 KIT="$(cd "$(dirname "$0")/.." && pwd)"
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
-printf '#!/bin/sh\nexec "$@"\n' >"$T/sudo"
+printf '#!/bin/sh\n[ -n "$FAKE_NO_SUDO" ] && exit 1\n[ "$1" = -v ] && exit 0\nexec "$@"\n' >"$T/sudo"
 printf '#!/bin/sh\n[ "$1 $2" = "info -f" ] && { echo "${FAKE_OS:-Ubuntu 24.04 LTS}"; exit 0; }\nexit 1\n' >"$T/docker"
 printf '#!/bin/sh\n[ -n "$FAKE_NO_CHAIN" ] && exit 1\nexit 0\n' >"$T/iptables"
 chmod +x "$T"/*
@@ -38,6 +38,7 @@ refuse "not an ssh public key" run --key 'command="id" ssh-ed25519 AAAA' --dry-r
 refuse "not a user name" run --key "$KEY" --user 'x;id' --dry-run
 refuse "Docker Desktop" env FAKE_OS="Docker Desktop" PATH="$T:$PATH" "$KIT/init-worker.sh" --key "$KEY" --dry-run
 refuse "colima" env FAKE_OS="Docker Desktop" PATH="$T:$PATH" "$KIT/init-worker.sh" --key "$KEY" --dry-run
+refuse "sudo did not work" env FAKE_NO_SUDO=1 PATH="$T:$PATH" "$KIT/init-worker.sh" --key "$KEY" --dry-run
 refuse "DOCKER-USER" env FAKE_NO_CHAIN=1 PATH="$T:$PATH" "$KIT/init-worker.sh" --key "$KEY" --dry-run
 
 [ "$FAIL" = 0 ] && echo "init-worker.sh dry run: ok"
