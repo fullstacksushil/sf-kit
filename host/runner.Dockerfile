@@ -21,6 +21,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxkbcommon0 libatspi2.0-0 libcups2 libxshmfence1 libgbm1 fonts-noto-color-emoji fonts-freefont-ttf \
   && rm -rf /var/lib/apt/lists/* \
   && npm install -g agent-browser@${AGENT_BROWSER_VERSION}
+# Chrome for Testing has no Linux arm64 build, so `agent-browser install` fails there (seen on 2026-11-17 in an arm64 VM).
+# On arm64, Debian's Chromium is the browser. The node user's agent-browser config points at it, below.
+# AGENT_BROWSER_EXECUTABLE_PATH and ~/.agent-browser/config.json as stated in the agent-browser 0.27.0 README, read on 2026-11-17.
+RUN if [ "$(dpkg --print-architecture)" = arm64 ]; then \
+      apt-get update && apt-get install -y --no-install-recommends chromium && rm -rf /var/lib/apt/lists/*; fi
 
 # rtk shortens the output of shell commands (git, npm, grep, ls) before the agent reads it, through a Claude Code
 # hook that orchestrator/src/docker.ts adds. The Apache-2.0 edition: the hook and the filters, no engine.
@@ -46,6 +51,9 @@ ENV RTK_SUPPRESS_HOOK_WARNING=1
 RUN mkdir /work && chown node:node /work
 
 USER node
-RUN curl -fsSL https://claude.ai/install.sh | bash && agent-browser install
+RUN curl -fsSL https://claude.ai/install.sh | bash \
+  && if [ "$(dpkg --print-architecture)" = arm64 ]; then \
+       mkdir -p ~/.agent-browser && echo '{"executablePath":"/usr/bin/chromium"}' > ~/.agent-browser/config.json; \
+     else agent-browser install; fi
 ENV PATH="/home/node/.local/bin:$PATH"
 WORKDIR /work
