@@ -2,8 +2,7 @@ import { NonRetriableError } from "inngest";
 import { inngest, ev } from "../inngest.ts";
 import * as docker from "../docker.ts";
 import {
-  agentFiles, blockersFromBody, cloneScript, gh, ghToken, issueNumber, owner, promptAgent, publishFileScript, pushCommits, pushScript, repo,
-  noWorkflowChanges, resetOnFailure, runAgent, setupScript, SLOTS, specFileScript, statusTag, ticketScript,
+  agentFiles, blockersFromBody, cloneScript, gh, ghToken, issueNumber, noWorkflowChanges, owner, placeRun, promptAgent, publishFileScript, pushCommits, pushScript, repo, resetOnFailure, runAgent, setupScript, TOTAL_SLOTS, specFileScript, statusTag, ticketScript,
 } from "../run.ts";
 
 // The course's implement-spec as lesson 09's design two, the "night shift": a spec labelled
@@ -96,6 +95,7 @@ export const specTicket = inngest.createFunction(
     const branch = `spec/${spec}-t${ticket}`;
     await step.run("mark-in-progress", () => gh.issues.addLabels({ owner, repo, issue_number: ticket, labels: ["agent:in-progress"] }));
     try {
+      await placeRun(step, runId); // first: every container of this run goes to the machine it picks
       // The ticket, the spec and the exploration notes, then a branch from the integration branch.
       await runAgent(step, runId,
         ticketScript(ticket) + specFileScript(spec) + cloneScript(`
@@ -143,6 +143,7 @@ export const implementSpec = inngest.createFunction(
     })) as string;
 
     try {
+      await placeRun(step, runId); // first: every container of this run goes to the machine it picks
       // 1. Tickets. /to-tickets usually made them already. If not, the course's decomposer does.
       if (!((await step.run("read-tickets", () => listTickets(spec))) as Ticket[]).length) {
         await runAgent(step, runId, specFileScript(spec) + cloneScript(""),
@@ -188,8 +189,8 @@ export const implementSpec = inngest.createFunction(
           }
           return closed;
         })) as number[]);
-        // At most SLOTS tickets a wave: a larger wave would queue the rest past runAgent's slot wait.
-        const frontier = frontierOf(tickets, closedOutside).slice(0, SLOTS);
+        // At most TOTAL_SLOTS tickets a wave, the slots of every machine: a larger wave would queue the rest past runAgent's slot wait.
+        const frontier = frontierOf(tickets, closedOutside).slice(0, TOTAL_SLOTS);
         if (!frontier.length) {
           const parked = open.filter((t) => t.parked).map((t) => `#${t.number}`);
           const waiting = outside.filter((b) => !closedOutside.has(b)).map((b) => `#${b}`);

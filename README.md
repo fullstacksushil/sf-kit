@@ -76,7 +76,9 @@ After an update of the orchestrator code, restart every factory: `sudo systemctl
 
 `FACTORY_MACHINES` in `common.env` lists the machines that run agents, with a slot count each: `local=2 ssh://factory@linux-box=3`. `local` is the factory host. Without `FACTORY_MACHINES`, the list is `local` with `FACTORY_SLOTS` slots. A bad list stops each factory at its start.
 
-Runs start only on `local` so far. To prepare a worker machine, run this on it as your own user. It refuses Docker Desktop, because the firewall rules cannot apply inside its VM.
+Each run picks one machine at its start and keeps it to the end, because its volumes stay on that machine. The pick takes the machine whose runs hold the smallest share of its slots, and counts runs that only prepare. A machine with 0 slots gets no new runs, and its runs finish there. An agent waits for a free slot on its own machine. On a worker machine, an agent carries the label `factory.machine`, a failure message names the machine, and the agent sends no traces.
+
+To prepare a worker machine, run this on it as your own user. It refuses Docker Desktop, because the firewall rules cannot apply inside its VM.
 
 ```bash
 ./init-worker.sh --key "$(ssh <factory host> cat .ssh/id_ed25519.pub)" --dry-run
@@ -285,7 +287,7 @@ Tested on 2026-11-16 with Caddy 2.11 and Chrome: Inngest answers 401 on `/dev`, 
 - A rebase stops when a workflow file has a conflict. A person resolves it, because the factory never pushes a workflow that an agent wrote.
 - Explore reads at most 100 labelled issues in one run. The rest keep `agent:explore` and wait for the next run.
 - All factories share the run network `factory-net`. An agent of one factory can reach a server that an agent of another factory started. Give each factory its own `RUNNER_NETWORK` before a factory serves a public repo.
-- `FACTORY_SLOTS` is one cap for the whole host, with no fair share. One factory can hold every slot. A run waits up to 2 hours for a slot.
+- The slots of a machine are one cap for every factory on it, with no fair share. One factory can hold every slot. A run waits up to 2 hours for a slot on its machine, even when another machine has a free slot.
 - A run container gets 4 CPUs and 8 GB of memory. Set `RUNNER_CPUS` and `RUNNER_MEMORY` in a factory env file to change the limits of that factory. Nothing checks that `FACTORY_SLOTS` runs fit in the memory of the host. When a run passes its limit, the kernel stops one process in the container, and the run fails with an unclear message.
 - To find the memory that a project needs, run its setup and its check in the runner image with `--memory <limit> --memory-swap <limit>`. The check must pass, and `/sys/fs/cgroup/memory.events` in the container must show `oom_kill 0`. Do not read `memory.peak` for this: it includes the file cache, and the file cache fills the limit.
 - The prototype task posts screenshots and a draft PR. It does not deploy a preview you can click. To try it, check out the PR and follow `prototypes/issue-<n>/README.md`.

@@ -45,6 +45,53 @@ export async function dockerCall(machine: string, args: string[], opts: { env?: 
   }
 }
 
+// ── placement: which machine a run uses ──────────────────────────────────
+// A run's two volumes live on one machine for the whole run, so every container of the run must go there.
+// The volumes are also the record of where a run is: after a restart, findRun asks each machine.
+const runMachine = new Map<string, string>();
+const hostOf = (target: string) => target.replace(/^ssh:\/\/[^@]*@/, "").replace(/:\d+$/, "");
+const lines = (out: string) => out.split("\n").map((l) => l.trim()).filter(Boolean);
+// A machine that does not answer counts as "no volumes here".
+const volumeNames = (machine: string, prefix: string) =>
+  dockerCall(machine, ["volume", "ls", "-q", "--filter", `name=${prefix}`]).then((r) => lines(r.stdout), () => [] as string[]);
+
+/** The machine that holds the run's volumes, or undefined. */
+export async function findRun(runId: string, machines = MACHINES): Promise<string | undefined> {
+  const found = await Promise.all(machines.map(async (m) => (await volumeNames(m.target, `run-${runId}-work`)).includes(`run-${runId}-work`)));
+  return machines.find((_, i) => found[i])?.target;
+}
+
+/** The run's machine. A run with no volumes yet (not placed) uses local, as before machines existed. */
+async function machineOf(runId: string): Promise<string> {
+  const known = runMachine.get(runId) ?? await findRun(runId);
+  if (known) runMachine.set(runId, known);
+  return known ?? LOCAL;
+}
+
+/**
+ * Pick the machine for a new run and create its volumes there. null when no machine has a slot.
+ * Call it under the slot lock, so the next pick sees these volumes. A retry returns the machine already picked.
+ * The load is the share of a machine's slots that its runs hold, counting runs that only prepare.
+ */
+export async function place(runId: string, machines = MACHINES): Promise<string | null> {
+  const found = await findRun(runId, machines);
+  if (found) return (runMachine.set(runId, found), found);
+  const open = machines.filter((m) => m.slots > 0);
+  const loads = await Promise.all(open.map(async (m) => (await volumeNames(m.target, "run-")).filter((v) => /^run-.+-work$/.test(v)).length / m.slots));
+  // Least load first. On a tie, the machine with more slots.
+  const best = open.map((m, i) => ({ m, load: loads[i] })).sort((a, b) => a.load - b.load || b.m.slots - a.m.slots)[0]?.m;
+  if (!best) return null;
+  for (const v of ["work", "tmp"]) await dockerCall(best.target, ["volume", "create", "--label", repoLabel(), `run-${runId}-${v}`]);
+  runMachine.set(runId, best.target);
+  return best.target;
+}
+
+/** For a failure message: " (on <host>)" for a worker machine, "" for local, so local messages stay as before. */
+export async function failureNote(runId: string): Promise<string> {
+  const m = await machineOf(runId);
+  return m === LOCAL ? "" : ` (on ${hostOf(m)})`;
+}
+
 // Every run gets two volumes: /work (the clone) and /tmp (ticket.md, pr-body.md, evidence/, review files).
 // The course's .sandcastle scripts read and write fixed /tmp paths, so they run unchanged.
 const IMAGE = process.env.RUNNER_IMAGE ?? "factory-runner:latest";
@@ -71,10 +118,10 @@ const envFlags = (vars: Record<string, string>) => Object.keys(vars).flatMap((k)
 /** Run a short script to completion in a fresh container on the run's volumes. Returns stdout. */
 // A clone plus project setup can take long. The limit only catches a call that hangs.
 const ONE_SHOT_TIMEOUT = 60 * 60_000;
-export async function oneShot(runId: string, script: string, vars: Record<string, string> = {}, machine = LOCAL): Promise<string> {
+export async function oneShot(runId: string, script: string, vars: Record<string, string> = {}): Promise<string> {
   try {
     const { stdout } = await dockerCall(
-      machine,
+      await machineOf(runId),
       ["run", "--rm", ...LIMITS, ...envFlags(vars), ...volumes(runId), "-w", "/work", IMAGE, "bash", "-euo", "pipefail", "-c", script],
       { env: vars, timeout: ONE_SHOT_TIMEOUT },
     );
@@ -129,25 +176,26 @@ fi
 /** Start the agent in the background and return at once. */
 // One run can start several agents (implement-spec: decompose, notes, merges). `agent` names the container,
 // `runId` names the volumes they share.
-export async function startAgent(runId: string, script: string, vars: Record<string, string>, subject: string, agent = runId, machine = LOCAL): Promise<void> {
-  // The labels let `sf` show which ticket or PR each running agent of its repo works on.
+export async function startAgent(runId: string, script: string, vars: Record<string, string>, subject: string, agent = runId): Promise<void> {
+  const machine = await machineOf(runId);
+  // The labels let `sf` show which ticket or PR each running agent of its repo works on, and on which machine.
   await dockerCall(
     machine,
-    ["run", "-d", "--name", `agent-${agent}`, "--label", `factory.subject=${subject}`, "--label", repoLabel(), ...LIMITS, ...envFlags(vars), ...volumes(runId), "-w", "/work/repo", IMAGE, "bash", "-c", activityHook + script],
+    ["run", "-d", "--name", `agent-${agent}`, "--label", `factory.subject=${subject}`, "--label", repoLabel(), "--label", `factory.machine=${hostOf(machine)}`, ...LIMITS, ...envFlags(vars), ...volumes(runId), "-w", "/work/repo", IMAGE, "bash", "-c", activityHook + script],
     { env: vars },
   );
 }
 
 /** null while the agent runs, else its exit code. */
-export async function agentExitCode(agent: string, machine = LOCAL): Promise<number | null> {
-  const { stdout } = await dockerCall(machine, ["inspect", "-f", "{{.State.Status}} {{.State.ExitCode}}", `agent-${agent}`]);
+export async function agentExitCode(runId: string, agent: string): Promise<number | null> {
+  const { stdout } = await dockerCall(await machineOf(runId), ["inspect", "-f", "{{.State.Status}} {{.State.ExitCode}}", `agent-${agent}`]);
   const [status, code] = stdout.trim().split(" ");
   return status === "exited" || status === "dead" ? Number(code) : null;
 }
 
 /** The last lines an ended agent printed, without the activity lines. For the failure message: cleanup deletes the log. */
-export async function agentLogTail(agent: string, machine = LOCAL): Promise<string> {
-  const { stdout, stderr } = await dockerCall(machine, ["logs", "--tail", "60", `agent-${agent}`]).catch(() => ({ stdout: "", stderr: "" }));
+export async function agentLogTail(runId: string, agent: string): Promise<string> {
+  const { stdout, stderr } = await dockerCall(await machineOf(runId), ["logs", "--tail", "60", `agent-${agent}`]).catch(() => ({ stdout: "", stderr: "" }));
   return tailForMessage(stdout + stderr, [process.env.CLAUDE_CODE_OAUTH_TOKEN ?? ""]);
 }
 // The message goes into a GitHub comment, and the agent's container holds the model token: redact it.
@@ -156,18 +204,32 @@ export const tailForMessage = (log: string, secrets: string[] = []) =>
     .split("\n").filter((l) => l.trim() && !l.startsWith('{"sf":1')).slice(-8).join("\n").slice(-600).replaceAll("```", "~~~");
 
 /** True when this run's agent container exists, running or not. */
-export async function agentExists(agent: string, machine = LOCAL): Promise<boolean> {
+async function agentExists(machine: string, agent: string): Promise<boolean> {
   const { stdout } = await dockerCall(machine, ["ps", "-aq", "--filter", `name=^agent-${agent}$`]);
   return stdout.trim() !== "";
 }
 
 /** Number of agent containers running on one machine, from every factory. The machine-slot count. */
-export async function runningAgents(machine = LOCAL): Promise<number> {
+export async function runningAgents(machine: string): Promise<number> {
   const { stdout } = await dockerCall(machine, ["ps", "-q", "--filter", "name=^agent-"]);
   return stdout.split("\n").filter(Boolean).length;
 }
 
-export async function cleanup(runId: string, machine = LOCAL): Promise<void> {
+/**
+ * Start the run's agent if its machine has a free slot. true: started, or started already by an earlier try.
+ * Call it under the slot lock, so "count, then start" cannot race another run for the last slot.
+ */
+export async function startIfFree(runId: string, script: string, subject: string, agent = runId, machines = MACHINES): Promise<boolean> {
+  const machine = await machineOf(runId);
+  if (await agentExists(machine, agent)) return true;
+  if ((await runningAgents(machine)) >= (machines.find((m) => m.target === machine)?.slots ?? 0)) return false;
+  await startAgent(runId, script, agentEnv(runId, machine), subject, agent);
+  return true;
+}
+
+export async function cleanup(runId: string): Promise<void> {
+  const machine = await machineOf(runId);
+  runMachine.delete(runId);
   // Every agent of the run: agent-<runId> and agent-<runId>-<key>.
   const { stdout } = await dockerCall(machine, ["ps", "-aq", "--filter", `name=^agent-${runId}`]).catch(() => ({ stdout: "" }));
   const ids = stdout.split("\n").filter(Boolean);
@@ -176,10 +238,11 @@ export async function cleanup(runId: string, machine = LOCAL): Promise<void> {
 }
 
 /** Model token plus optional OTLP trace export (Phoenix or self-hosted Langfuse). */
-export function agentEnv(runId: string): Record<string, string> {
+// A worker machine gets no trace settings: the trace endpoint (phoenix on the run network) exists only on the factory host.
+export function agentEnv(runId: string, machine = LOCAL): Record<string, string> {
   const env: Record<string, string> = { CLAUDE_CODE_OAUTH_TOKEN: process.env.CLAUDE_CODE_OAUTH_TOKEN! };
   const endpoint = process.env.OTEL_TRACES_ENDPOINT;
-  if (endpoint) {
+  if (endpoint && machine === LOCAL) {
     Object.assign(env, {
       CLAUDE_CODE_ENABLE_TELEMETRY: "1",
       CLAUDE_CODE_ENHANCED_TELEMETRY_BETA: "1",

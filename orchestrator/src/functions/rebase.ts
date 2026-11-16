@@ -2,7 +2,7 @@ import { cron } from "inngest";
 import { inngest, ev } from "../inngest.ts";
 import * as docker from "../docker.ts";
 import {
-  cloneScript, gh, ghToken, issueNumber, owner, prRefusal, promptAgent, pushScript, repo, resetOnFailure, runAgent, setupScript, statusTag,
+  cloneScript, gh, ghToken, issueNumber, owner, placeRun, promptAgent, prRefusal, pushScript, repo, resetOnFailure, runAgent, setupScript, statusTag,
 } from "../run.ts";
 
 // The course's morning rebase (lesson 08-06). Once a night, rebase open PRs that are behind their base, so
@@ -68,6 +68,7 @@ export const rebasePr = inngest.createFunction(
     if (pr.refusal) return { refused: pr.refusal };
 
     try {
+      await placeRun(step, runId); // first: every container of this run goes to the machine it picks
       await step.run("prepare", () => docker.oneShot(runId, cloneScript(`git checkout -q ${pr.branch}`), ghToken()));
       // No token, and no project code: git only. "conflict" leaves the rebase in progress for the agent.
       const how = ((await step.run("try-rebase", () => docker.oneShot(runId, `

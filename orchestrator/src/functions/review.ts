@@ -1,7 +1,7 @@
 import { NonRetriableError } from "inngest";
 import { inngest, ev } from "../inngest.ts";
 import * as docker from "../docker.ts";
-import { agentFiles, cloneScript, gh, ghToken, issueCheckFn, issueNumber, owner, parentSpecScript, pushCommits, repo, prRefusal, resetOnFailure, runAgent, safeRef, statusTag } from "../run.ts";
+import { agentFiles, cloneScript, gh, ghToken, issueCheckFn, issueNumber, owner, parentSpecScript, placeRun, prRefusal, pushCommits, repo, resetOnFailure, runAgent, safeRef, statusTag } from "../run.ts";
 
 // The spec is whatever issue the PR body says it closes, the same rule as the course's review workflow.
 const specScript = (pr: number) => `
@@ -45,6 +45,7 @@ export const reviewPr = inngest.createFunction(
     if (pr.refusal) return { refused: pr.refusal };
 
     try {
+      await placeRun(step, runId); // first: every container of this run goes to the machine it picks
       // review.ts reads BASE_REF, PR_NUMBER and BRANCH. They are not secrets, so they go in the script.
       await runAgent(
         step,

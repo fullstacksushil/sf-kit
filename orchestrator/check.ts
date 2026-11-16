@@ -234,10 +234,10 @@ console.log("activity hook checks ok");
     assert.throws(() => parseMachines(bad, "2"), /FACTORY_MACHINES/, JSON.stringify(bad));
   process.env.FACTORY_MACHINES = "local=1 ssh://u@h;id=1";
   await assert.rejects(import("./src/docker.ts?badmachines"), /FACTORY_MACHINES/, "a bad list stops the orchestrator at start");
-  process.env.FACTORY_MACHINES = "ssh://u@h=2";
+  process.env.FACTORY_MACHINES = "ssh://u@h=2 ssh://u@g=3";
   // A fresh process: run.ts reads MACHINES from docker.ts, which this process already loaded.
-  const noLocal = spawnSync(process.execPath, ["--import", "tsx", "src/run.ts"], { env: { ...process.env }, encoding: "utf8", timeout: 20000 });
-  assert.ok(noLocal.status !== 0 && /list local/.test(noLocal.stderr), "runs start only on local so far");
+  const workersOnly = spawnSync(process.execPath, ["--import", "tsx", "-e", 'import("./src/run.ts").then((r) => console.log(r.TOTAL_SLOTS))'], { env: { ...process.env }, encoding: "utf8", timeout: 20000 });
+  assert.equal(workersOnly.stdout.trim(), "5", "a list without local works, and the slots add up");
   delete process.env.FACTORY_MACHINES;
 }
 { // Every docker call goes to its machine: DOCKER_HOST for a remote one, the process env for local. Every call has a timeout.
@@ -252,13 +252,74 @@ console.log("activity hook checks ok");
     await dockerCall("local", ["info"]);
     await dockerCall("ssh://factory@linux-box", ["info"]);
     assert.equal(await runningAgents("ssh://factory@linux-box"), 2);
-    assert.equal(await runningAgents(), 2, "the default machine is local");
+    assert.equal(await runningAgents("local"), 2);
     assert.deepEqual(readFileSync(`${dir}/log`, "utf8").trim().split("\n"), [
       "none info", "ssh://factory@linux-box info",
       "ssh://factory@linux-box ps -q --filter name=^agent-", "none ps -q --filter name=^agent-"]);
     const t = Date.now();
     await assert.rejects(dockerCall("local", ["hang"], { timeout: 300 }), /timed out after 300 ms/);
     assert.ok(Date.now() - t < 3000, "the timeout ends a hung call");
+  } finally { process.env.PATH = path; }
+}
+{ // Placement: a run's volumes live on one machine and record where the run is. Every call of the run goes there.
+  const { place, findRun, oneShot, cleanup, startIfFree, agentExitCode, failureNote } = await import("./src/docker.ts");
+  const { writeFileSync, chmodSync, readdirSync: ls } = await import("node:fs");
+  const dir = mkdtempSync(`${tmpdir()}/sf-place-`);
+  // A fake docker with state per DOCKER_HOST: volumes and agent containers are files.
+  writeFileSync(`${dir}/docker`, `#!/bin/sh
+h=$(printf %s "\${DOCKER_HOST:-local}" | tr -c 'A-Za-z0-9' _); d="${dir}/m/$h"; mkdir -p "$d/vol" "$d/agents"
+echo "\${DOCKER_HOST:-local} $*" | tr "\\n" " " >> "${dir}/log"; echo >> "${dir}/log"
+case "$1 $2" in
+  "volume create") for a in "$@"; do last="$a"; done; touch "$d/vol/$last" ;;
+  "volume ls") ls "$d/vol" ;;
+  "volume rm") shift 3; for v in "$@"; do rm -f "$d/vol/$v"; done ;;
+  "ps -q") ls "$d/agents" ;;
+  "run -d") touch "$d/agents/$4" ;;
+  "inspect -f") echo "exited 0" ;;
+esac
+exit 0
+`);
+  chmodSync(`${dir}/docker`, 0o755);
+  const path = process.env.PATH;
+  process.env.PATH = `${dir}:${path}`;
+  const machines = [{ target: "local", slots: 1 }, { target: "ssh://f@b", slots: 2 }, { target: "ssh://f@c", slots: 0 }];
+  const log = () => readFileSync(`${dir}/log`, "utf8").trim().split("\n").map((l) => l.trim());
+  try {
+    assert.equal(await place("r1", machines), "ssh://f@b", "no load anywhere: the machine with the most slots");
+    assert.equal(await place("r2", machines), "local", "b holds 1 of 2, local 0 of 1");
+    assert.equal(await place("r3", machines), "ssh://f@b", "local holds 1 of 1, b 1 of 2");
+    assert.equal(await place("r1", machines), "ssh://f@b", "a retry keeps the run's machine");
+    assert.equal(log().filter((l) => /volume create .*run-r1-work$/.test(l)).length, 1, "a retry creates no second volume");
+    assert.ok(log().some((l) => l.startsWith("ssh://f@b volume create --label factory.repo=")), "the volumes carry the repo label");
+    assert.equal(await place("r4", [{ target: "local", slots: 0 }]), null, "no machine with a slot: no place");
+    assert.deepEqual(ls(`${dir}/m/ssh___f_c/vol`), [], "a machine with 0 slots gets no volume");
+    // After a restart the orchestrator has no memory. The volumes still say where each run is.
+    assert.equal(await findRun("r2", machines), "local");
+    assert.equal(await findRun("r3", machines), "ssh://f@b");
+    assert.equal(await findRun("nope", machines), undefined);
+
+    // Every call of r3 goes to b: one-shot steps, the agent start, the exit check, the cleanup.
+    const before = log().length;
+    process.env.OTEL_TRACES_ENDPOINT = "http://phoenix:6006/v1/traces";
+    await oneShot("r3", "true");
+    assert.equal(await startIfFree("r3", "true", "issue #3", "r3", machines), true);
+    assert.equal(await startIfFree("r3", "true", "issue #3", "r3", machines), true, "a retry after the start: still started");
+    delete process.env.OTEL_TRACES_ENDPOINT;
+    assert.equal(await agentExitCode("r3", "r3"), 0);
+    await cleanup("r3");
+    const r3calls = log().slice(before);
+    assert.ok(r3calls.length >= 5 && r3calls.every((l) => l.startsWith("ssh://f@b ")), r3calls.join("\n"));
+    assert.ok(r3calls.some((l) => l.includes("--label factory.machine=b")), "the agent carries its machine");
+    assert.ok(!r3calls.some((l) => l.includes("OTEL_")), "no trace settings go to a worker machine");
+    assert.ok(r3calls.some((l) => l.includes("-e CLAUDE_CODE_OAUTH_TOKEN")), "the model token goes to the agent");
+    assert.ok(!ls(`${dir}/m/ssh___f_b/vol`).some((v) => v.startsWith("run-r3-")), "cleanup removes the volumes on b");
+
+    // The start step checks the slots of the run's own machine. local has 1 slot.
+    writeFileSync(`${dir}/m/local/agents/agent-other`, "");
+    assert.equal(await startIfFree("r2", "true", "issue #2", "r2", machines), false, "local is full");
+    // A failure on a worker machine names it. On local, the message stays as it was.
+    assert.equal(await failureNote("r1"), " (on b)");
+    assert.equal(await failureNote("r2"), "");
   } finally { process.env.PATH = path; }
 }
 console.log("machine checks ok");

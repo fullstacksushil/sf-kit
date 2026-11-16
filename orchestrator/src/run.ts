@@ -17,9 +17,8 @@ export const PRIVATE_DEPS = (process.env.RUN_PRIVATE_DEPS ?? "").split(/\s+/).fi
   return d;
 });
 const MAX_MINUTES = Number(process.env.RUN_MAX_MINUTES ?? 45);
-// The factory host's own slots, from FACTORY_MACHINES (or FACTORY_SLOTS without it). Runs start only on local so far.
-export const SLOTS = docker.MACHINES.find((m) => m.target === docker.LOCAL)?.slots
-  ?? (() => { throw new Error("FACTORY_MACHINES: list local, for example local=2. Runs start only on local so far."); })();
+// The slots of every machine together: how many agents can run at once.
+export const TOTAL_SLOTS = docker.MACHINES.reduce((n, m) => n + m.slots, 0);
 
 /** The parts of Inngest's step tools that a run uses. */
 export type Step = {
@@ -278,6 +277,21 @@ function slotLock<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 /**
+ * Pick the run's machine and create its volumes there. The first step of each function that runs containers,
+ * inside the try whose finally cleans up, so the volumes never outlive the run.
+ * The pick never waits for a free slot: the start of the agent does. It waits only when no machine has any slots.
+ */
+export async function placeRun(step: Step, runId: string): Promise<void> {
+  for (let i = 0; ; i++) {
+    const machine = await step.run(`place-${i}`, () => slotLock(() => docker.place(runId))
+      .catch((e) => { if (e instanceof LockTimeout) return null; throw e; }));
+    if (machine) return;
+    if (i >= 120) throw new Error("No machine had a slot for 2 hours. Check the slot counts in FACTORY_MACHINES.");
+    await step.sleep(`wait-place-${i}`, "1m");
+  }
+}
+
+/**
  * Prepare the workspace, start the agent detached, and check it once a minute.
  * Every step is short, so a restart of the orchestrator never kills the agent.
  * `prepare` runs with the token and must not run project code. Pass null when the caller prepared the workspace.
@@ -292,29 +306,25 @@ export async function runAgent(step: Step, runId: string, prepare: string | null
     await step.run(id("setup"), () => docker.oneShot(runId, setupScript));
   }
 
-  // Wait for a machine slot, then start. The in-process queue and the host lock make "count, then start" atomic
-  // across every factory on the host: two runs cannot both take the last slot.
+  // Wait for a slot on the run's machine, then start. The in-process queue and the host lock make "count, then start"
+  // atomic across every factory on the host: two runs cannot both take the last slot.
   for (let i = 0; ; i++) {
-    const started = (await step.run(id(`start-agent-${i}`), () => slotLock(async () => {
-      if (await docker.agentExists(agent)) return true; // a retry of this step after the start succeeded
-      if ((await docker.runningAgents()) >= SLOTS) return false;
-      await docker.startAgent(runId, agentScript, docker.agentEnv(runId), subject, agent);
-      return true;
-    }).catch((e) => { if (e instanceof LockTimeout) return false; throw e; }))) as boolean;
+    const started = (await step.run(id(`start-agent-${i}`), () => slotLock(() => docker.startIfFree(runId, agentScript, subject, agent))
+      .catch((e) => { if (e instanceof LockTimeout) return false; throw e; }))) as boolean;
     if (started) break;
-    if (i >= 120) throw new Error(`No free machine slot for 2 hours (${SLOTS} slots on local, from FACTORY_MACHINES or FACTORY_SLOTS).`);
+    if (i >= 120) throw new Error(`No free slot on the run's machine for 2 hours${await docker.failureNote(runId)}. Check FACTORY_MACHINES.`);
     await step.sleep(id(`wait-slot-${i}`), "1m");
   }
 
   let code: number | null = null;
   for (let i = 0; i < MAX_MINUTES && code === null; i++) {
     await step.sleep(id(`wait-${i}`), "1m");
-    code = (await step.run(id(`check-${i}`), () => docker.agentExitCode(agent))) as number | null;
+    code = (await step.run(id(`check-${i}`), () => docker.agentExitCode(runId, agent))) as number | null;
   }
-  if (code === null) throw new Error(`The agent ran longer than ${MAX_MINUTES} minutes.`);
+  if (code === null) throw new Error(`The agent ran longer than ${MAX_MINUTES} minutes${await docker.failureNote(runId)}.`);
   if (code !== 0) {
-    const tail = (await step.run(id("read-log"), () => docker.agentLogTail(agent))) as string;
-    throw new Error(`The agent exited with code ${code}.${tail ? ` Its last output:\n\n\`\`\`\n${tail}\n\`\`\`\n` : ""}`);
+    const tail = (await step.run(id("read-log"), () => docker.agentLogTail(runId, agent))) as string;
+    throw new Error(`The agent exited with code ${code}${await docker.failureNote(runId)}.${tail ? ` Its last output:\n\n\`\`\`\n${tail}\n\`\`\`\n` : ""}`);
   }
 }
 
