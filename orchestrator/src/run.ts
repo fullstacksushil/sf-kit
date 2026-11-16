@@ -244,11 +244,11 @@ export async function pushCommits(step: Step, runId: string, branch: string, opt
  * A child `flock` holds the lock until its stdin closes. The kernel drops the lock when that child or this
  * process dies, so a dead holder never blocks the others. The file's contents do not matter.
  */
-// ponytail: fn has no limit of its own. Each docker call in it has one (10 s to list, 60 s else), so a machine that stops
-// answering mid-call holds every factory's slot lock for up to about 3 minutes. A per-machine lock would fix that. The wait gives up after 5 minutes
+// fn has no limit of its own. Each docker call in it has one (10 s to list, 60 s else). slotLock keeps one lock per machine,
+// so a machine that stops answering mid-call holds only its own lock, for up to about 3 minutes. The wait gives up after 5 minutes
 // with a LockTimeout, and runAgent counts that as "no slot now".
 // Needs util-linux flock on the host, and every factory must run as the same user (sticky /tmp refuses others' files).
-export async function hostLock<T>(fn: () => Promise<T>, path = "/tmp/factory-slots.flock", waitSeconds = 300): Promise<T> {
+export async function hostLock<T>(fn: () => Promise<T>, path: string, waitSeconds = 300): Promise<T> {
   // -E 75: a timeout exits 75, apart from flock's own errors (1).
   const child = spawn("flock", ["-x", "-w", String(waitSeconds), "-E", "75", path, "sh", "-c", "echo held; exec cat"], { stdio: ["pipe", "pipe", "inherit"] });
   child.stdin.on("error", () => {});
@@ -268,12 +268,17 @@ export async function hostLock<T>(fn: () => Promise<T>, path = "/tmp/factory-slo
 
 export class LockTimeout extends Error {}
 
-let slotQueue: Promise<unknown> = Promise.resolve();
-/** Run fn after every earlier caller of this process, under the host lock that the other factories also take. */
-// ponytail: one host-wide cap with no fair share, so one factory can hold every slot. Add per-factory caps if that hurts.
-function slotLock<T>(fn: () => Promise<T>): Promise<T> {
-  const next = slotQueue.then(() => hostLock(fn), () => hostLock(fn));
-  slotQueue = next.catch(() => {});
+const slotQueues = new Map<string, Promise<unknown>>();
+/**
+ * Run fn after every earlier caller of this process with the same key, under the host lock of that key, which the
+ * other factories on this host also take. One key per machine for the agent start, and the key "pick" for the pick.
+ * So a machine that stops answering stalls only the starts on that machine, and the pick for at most its list limit.
+ */
+// ponytail: one cap per machine with no fair share, so one factory can hold every slot. Add per-factory caps if that hurts.
+export function slotLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const path = `/tmp/factory-slots-${key.replace(/[^A-Za-z0-9.-]/g, "_")}.flock`;
+  const next = (slotQueues.get(key) ?? Promise.resolve()).then(() => hostLock(fn, path), () => hostLock(fn, path));
+  slotQueues.set(key, next.catch(() => {}));
   return next;
 }
 
@@ -307,7 +312,7 @@ export async function activeRunIds(base = process.env.INNGEST_BASE_URL ?? "http:
  */
 export async function placeRun(step: Step, runId: string): Promise<void> {
   for (let i = 0; ; i++) {
-    const machine = (await step.run(`place-${i}`, () => slotLock(() => docker.place(runId))
+    const machine = (await step.run(`place-${i}`, () => slotLock("pick", () => docker.place(runId))
       .catch((e) => { if (e instanceof LockTimeout) return null; throw e; }))) as string | null;
     // On a replay this is the stored result. Every later step of this invocation uses it.
     if (machine) { docker.remember(runId, machine); void docker.sweepReady(runId, () => activeRunIds()); return; }
@@ -334,7 +339,7 @@ export async function runAgent(step: Step, runId: string, prepare: string | null
   // Wait for a slot on the run's machine, then start. The in-process queue and the host lock make "count, then start"
   // atomic across every factory on the host: two runs cannot both take the last slot.
   for (let i = 0; ; i++) {
-    const started = (await step.run(id(`start-agent-${i}`), () => slotLock(() => docker.startIfFree(runId, agentScript, subject, agent))
+    const started = (await step.run(id(`start-agent-${i}`), async () => slotLock(await docker.machineOf(runId), () => docker.startIfFree(runId, agentScript, subject, agent))
       .catch((e) => { if (e instanceof LockTimeout) return false; throw e; }))) as boolean;
     if (started) break;
     if (i >= 120) throw new Error(`No free slot on the run's machine for 2 hours${await docker.failureNote(runId)}. Check FACTORY_MACHINES.`);

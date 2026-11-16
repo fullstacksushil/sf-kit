@@ -138,7 +138,7 @@ export async function findRun(runId: string, machines = MACHINES): Promise<strin
 }
 
 /** The run's machine. Only a run that no machine holds (never placed) uses local, as before machines existed. */
-async function machineOf(runId: string): Promise<string> {
+export async function machineOf(runId: string): Promise<string> {
   const known = runMachine.get(runId) ?? await findRun(runId);
   if (known) runMachine.set(runId, known);
   return known ?? LOCAL;

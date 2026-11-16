@@ -425,4 +425,15 @@ exit 0
   await assert.rejects(activeRunIds("http://127.0.0.1:8288", answer(page(["a"], undefined as unknown as boolean))), /cut/, "no page info: maybe cut");
   await assert.rejects(activeRunIds("http://127.0.0.1:8288", answer({ errors: [{ message: "no field" }] })), /no run list/);
 }
+{ // One lock per machine, and one for the pick. A machine that hangs stalls only its own starts.
+  const { slotLock } = await import("./src/run.ts");
+  const timer = (ms: number) => new Promise((r) => setTimeout(() => r("timeout"), ms));
+  let release!: () => void;
+  const held = slotLock("ssh://f@a", () => new Promise<void>((r) => (release = r)));
+  await new Promise((r) => setTimeout(r, 200));
+  assert.equal(await Promise.race([slotLock("ssh://f@b", async () => 7), timer(3000)]), 7, "b does not wait for a");
+  assert.equal(await Promise.race([slotLock("pick", async () => 8), timer(3000)]), 8, "the pick does not wait for a");
+  assert.equal(await Promise.race([slotLock("ssh://f@a", async () => 9), timer(500)]), "timeout", "a waits for a");
+  release(); await held;
+}
 console.log("machine checks ok");
