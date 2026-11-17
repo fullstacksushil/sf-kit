@@ -24,21 +24,55 @@ flowchart LR
     gh -- "PR ready" --> you([You review<br/>and merge])
 ```
 
-## Brakes and accelerators
+## What makes the factory work
 
-The brakes build your trust in the agents:
+The course draws a software factory as two paths from the team to the agent. This map follows that picture, with the sf-kit part in each box.
 
-- **You plan first.** Grilling asks you questions until you and the agent share one design. The spec and the tickets carry that design to every agent.
-- **A second agent reviews each PR.** It checks the PR against its ticket and your coding standards. It never approves. Only you merge.
-- **Each commit runs your checks.** A pre-commit hook runs the check of the project in every agent clone. CI runs the full check.
-- **Agents stay in a box.** They run without the GitHub token, behind a firewall, and follow only issues from collaborators. See [Security](docs/security.md).
+```mermaid
+flowchart BT
+    team["<b>The team</b><br/>you: plan, decide, merge"]
+    know["<b>Knowledge</b><br/>GLOSSARY.md, ADRs,<br/>CODING_STANDARDS.md, specs"]
+    brakes["<b>Brakes</b><br/>checks, review agent,<br/>your review"]
+    infra["<b>Infrastructure</b><br/>factory host, worker machines,<br/>runner containers"]
+    accel["<b>Accelerators</b><br/>labels, night shift,<br/>scheduled tasks"]
+    agent["<b>The agent</b><br/>Claude Code in a container"]
+    team -- grows --> know -- creates --> brakes -- "slows down" --> agent
+    team -- builds --> infra -- creates --> accel -- "speeds up" --> agent
+```
 
-The accelerators push more code through:
+| Box | What it is | What sf-kit gives you |
+| --- | --- | --- |
+| The team | The people who think about strategy | `sf` plans each idea with you. Nothing merges without your two yes answers. |
+| Knowledge | Shared language and good software fundamentals | Grilling writes `GLOSSARY.md` and ADRs. The implementer adds new terms. The reviewer adds rules to `CODING_STANDARDS.md`. |
+| Brakes | Checks and review that slow the agent and raise quality | A pre-commit hook runs your checks on each agent commit. CI runs the full check. A review agent reads each PR, and it never approves. |
+| Infrastructure | Sandboxes and scripts that let agents work while you are away | One host for all your repos, worker machines for more agents, and a new container with no GitHub token for each run. |
+| Accelerators | Triggers and schedules that start agents with no person | Labels start explore, implement and the night shift. Schedules start ratchet, rebase and architecture review. |
+| The agent | The model and harness that write the code | Claude Code, inside a firewall. See [Security](docs/security.md). |
 
-- **Explore mode** gives each ticket its own agent and its own PR.
-- **The night shift** builds all tickets of a spec in parallel and opens one PR.
-- **Scheduled tasks** fix lint failures, rebase PRs whose base moved, and file architecture tickets.
-- **Many repos and many machines.** One host serves all your repos, and worker machines add agent slots. See the next section.
+**Brakes first.** The course warns that most people start with accelerators, and calls that backwards. sf-kit follows its order. `init-project.sh` adds the knowledge files and the checks before any agent runs. Before a build, `sf` checks that `GLOSSARY.md`, `CODING_STANDARDS.md` and `docs/` are committed and on GitHub, because the agents clone from there.
+
+### Below the waterline
+
+The course shows good results as the tip of an iceberg. Under the water are three layers: how models work, how harnesses work, and the environment of your agent. You choose the model and the harness. sf-kit builds the third layer.
+
+```mermaid
+flowchart TB
+    tip["Great, reliable, predictable results"]
+    models["How models work"]
+    harness["How harnesses work"]
+    env["Your agent's environment<br/><i>sf-kit: runner image, hooks, checks, tickets</i>"]
+    tip ~~~ models ~~~ harness ~~~ env
+    style tip fill:#f9d65c,stroke:#333,color:#000
+    style models fill:#f3efe6,stroke:#333,color:#000
+    style harness fill:#e8e1d3,stroke:#333,color:#000
+    style env fill:#d9d0c1,stroke:#333,color:#000
+```
+
+Each agent starts in the same environment. It gets the runner image with a browser and rtk, an activity hook and your pre-commit checks. Its ticket ends with its parent spec.
+
+### When to use the factory
+
+The course says a factory suits routine ticket work. New projects, exploratory work and the complex parts of a system still work best with you and one agent in a loop. `sf` covers both: it plans with you first, then gives the routine tickets to the factory.
 
 ## Many repos, many machines
 
