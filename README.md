@@ -2,7 +2,7 @@
 
 A coding agent writes code fast. It also writes slop. It has no judgment, and it sees only the task in front of it. Use one by hand, and your day turns into bug hunts, terminal juggling and live corrections.
 
-Those are engineering problems, and they have engineering answers. sf-kit is a software factory that you run on your own machines. It follows Matt Pocock's course [Software Factories for Real Engineers](https://www.aihero.dev/cohorts/software-factories-for-real-engineers-xdy1m). The course takes practices that work for large human teams, like domain language, deep modules and code review, and applies them to agents.
+Those are engineering problems, and they have engineering answers. sf-kit is a software factory that you run on your own machines. I built it while I took Matt Pocock's cohort [Software Factories for Real Engineers](https://www.aihero.dev/cohorts/software-factories-for-real-engineers-xdy1m), and it puts what I learned there into code. The course takes practices that work for large human teams, like domain language, deep modules and code review, and applies them to agents.
 
 You do the part that needs a person. `sf` plans each idea with you until you agree on the design. Then it writes the spec and the tickets and gives them to the factory. Agents build the tickets in Docker containers, and a second agent reviews each PR. You return to PRs that are ready for your review, and you merge.
 
@@ -56,10 +56,7 @@ flowchart BT
 The course shows good results as the tip of an iceberg. Under the water are three layers: how models work, how harnesses work, and the environment of your agent. You choose the model and the harness. sf-kit builds the third layer.
 
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://res.cloudinary.com/total-typescript/image/upload/v1786640503/workshops/ai-coding-crash-course/iceberg-dark.png">
-    <img width="360" alt="Iceberg: great, reliable, predictable results above the waterline. Below it: how models work, how harnesses work, and your agent's environment." src="https://res.cloudinary.com/total-typescript/image/upload/v1786640502/workshops/ai-coding-crash-course/iceberg-light.png">
-  </picture>
+  <img width="360" alt="Iceberg: great, reliable, predictable results above the waterline. Below it: how models work, how harnesses work, and your agent's environment." src="https://res.cloudinary.com/total-typescript/image/upload/v1786640502/workshops/ai-coding-crash-course/iceberg-light.png">
   <br><sub>Image: Matt Pocock, <a href="https://www.aihero.dev/cohorts/software-factories-for-real-engineers-xdy1m">AI Hero</a>.</sub>
 </p>
 
