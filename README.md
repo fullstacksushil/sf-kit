@@ -6,6 +6,8 @@ Those are engineering problems, and they have engineering answers. sf-kit is a s
 
 You do the part that needs a person. `sf` plans each idea with you until you agree on the design. Then it writes the spec and the tickets and gives them to the factory. Agents build the tickets in Docker containers, and a second agent reviews each PR. You return to PRs that are ready for your review, and you merge.
 
+> **Take the course.** I recommend Matt's cohort [Software Factories for Real Engineers](https://www.aihero.dev/cohorts/software-factories-for-real-engineers-xdy1m) to every engineer who works with coding agents. This repo shows what I built. The course teaches why each part is there, and how to design a factory for your own codebase and team.
+
 | Agents by hand | Agents in sf-kit |
 | --- | --- |
 | You find the bugs in every diff. | A review agent reads each PR against its ticket and your coding standards first. |
