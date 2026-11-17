@@ -2,7 +2,7 @@
 # Make this machine a worker machine: it runs agent containers for a factory host, and holds no factory config.
 # Sets up: a worker user that the factory host reaches over ssh, the run network with the factory firewall rules,
 # and the runner image. Run it on the worker machine, as your own user. It calls sudo for the steps that need it.
-# Safe to run again. README.md in this folder, "Worker machines", explains the setup.
+# Safe to run again. docs/setup.md, "Worker machines", explains the setup.
 set -euo pipefail
 
 KIT="$(cd "$(dirname "$0")" && pwd)"

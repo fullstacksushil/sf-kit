@@ -3,7 +3,7 @@
 # Installs: Inngest + Postgres + Redis (Docker Compose), optional Phoenix traces, the run network
 # with firewall rules, the runner image, and the orchestrator template unit (one factory per repo).
 # Safe to run again: it never overwrites secrets or existing firewall rules.
-# Design and reasons: README.md in this folder.
+# Design and reasons: docs/setup.md in this folder.
 set -euo pipefail
 
 KIT="$(cd "$(dirname "$0")" && pwd)"
