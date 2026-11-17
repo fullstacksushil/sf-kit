@@ -56,19 +56,19 @@ Run `init-host.sh` as your own user, without `sudo`. The script calls `sudo` for
 
 ## One factory per repo
 
-One factory host runs one factory for each repo. All factories share one Inngest server, one runner image, one run network and one slot cap. Each factory has its own name, Inngest app, event names, port, env file, GitHub token and systemd unit.
+One factory host runs one factory for each repo. All factories share one Inngest server, one runner image, one run network and one list of machines with their slots. Each factory has its own name, Inngest app, event names, port, env file, GitHub token and systemd unit.
 
 | Item | Where |
 | --- | --- |
 | Factory name | Lowercase letters, digits and dashes, starting with a letter, 21 characters at most. The wizard proposes one from the repo name. |
-| Shared env file | `/etc/factory/common.env`: the Inngest settings and keys, `CLAUDE_CODE_OAUTH_TOKEN`, `FACTORY_SLOTS` and the trace settings |
+| Shared env file | `/etc/factory/common.env`: the Inngest settings and keys, `CLAUDE_CODE_OAUTH_TOKEN`, `FACTORY_SLOTS`, `FACTORY_MACHINES` and the trace settings |
 | Factory env file | `/etc/factory/factories/<name>.env`: `GITHUB_REPO`, `FACTORY_PAT`, `PORT`, `GITHUB_WEBHOOK_SECRET`, `GITHUB_POLL` and the other values of one repo. A value here wins over the shared file. |
 | systemd unit | `factory-orchestrator@<name>.service`. The unit sets the factory name, so no env file can change it. |
 | Inngest app | `software-factory-<name>` |
 | Event names | `factory/<name>/<event>`, for example `factory/qf/ratchet.requested` |
 | Port | The wizard picks the highest saved port plus 1, from 3000. The firewall lets Inngest reach ports 3000 to 3099. |
 
-`sf` finds the factory whose `GITHUB_REPO` matches the git origin of the folder. If no factory serves the repo, `sf` offers to run the wizard. Set `ENV_DIR` to read the env files from a folder other than `/etc/factory`. Set `SF_ORCHESTRATOR_URL` and `SF_FACTORY` to use a factory on another machine.
+`sf` finds the factory whose `GITHUB_REPO` matches the git origin of the folder. If no factory serves the repo, `sf` offers to run the wizard. `sf` searches `~/.config/sf` first, then `/etc/factory`. Set `ENV_DIR` to a colon-separated list of folders to search instead. Set `SF_ORCHESTRATOR_URL` and `SF_FACTORY` to use a factory on another machine.
 
 After an update of the orchestrator code, restart every factory: `sudo systemctl restart 'factory-orchestrator@*'`.
 
@@ -80,7 +80,9 @@ Each run picks one machine at its start and keeps it to the end, because its vol
 
 An agent stops itself 5 minutes after the maximum run time, also on a laptop that the orchestrator could not reach for a while. Cleanup logs what it cannot remove. The orchestrator marks a machine for a sweep when it starts, and each time a call to the machine does not answer. The next pick that gets an answer from a marked machine sweeps it. The sweep removes the containers and volumes of runs that Inngest no longer runs or queues, if they are older than an hour. The mark stays while younger leftovers wait. The sweep removes nothing when Inngest does not say that its list of active runs is whole.
 
-Every agent carries the label `factory.machine`: `local` or the host name. On a worker machine, a failure message of the agent names the machine, and the agent sends no traces.
+Every agent carries the label `factory.machine`: `local` or the host name. On a worker machine, a failure message of the agent names the machine, and the agent sends no traces. `sf` and the herdr plugin read only the Docker of their own machine, so they do not show agents on a worker machine. Watch those runs in the Inngest dashboard.
+
+The runner image builds on amd64 and arm64. Chrome for Testing has no Linux arm64 build, so on arm64 the image uses Debian's Chromium.
 
 To prepare a worker machine, run this on it as your own user. It refuses Docker Desktop, because the firewall rules cannot apply inside its VM.
 
@@ -146,7 +148,7 @@ Other commands: `sf new`, `sf status`, `sf watch`, `sf logs <text>`, `sf retro`,
 - **GitHub holds the state.** `.sf/state.json` holds only the Claude session id and the spec and map numbers. Git ignores it.
 - **`sf` never merges on its own.** A merge needs two yes answers. The default answer at every stop is "skip".
 - **`sf` needs a terminal.** Without one, it reads one answer per line from stdin and stops when the answers run out. It never answers for you.
-- **The agent view needs Docker access.** `sf` reads the agent containers on the same machine. It shows only the agents of its repo. On another machine, use the Inngest dashboard.
+- **The agent view needs Docker access.** `sf` reads the agent containers on the same machine. It shows only the agents of its repo. For agents on another machine, use the Inngest dashboard.
 
 ### What the board shows
 
@@ -278,7 +280,8 @@ Tested on 2026-11-16 with Caddy 2.11 and Chrome: Inngest answers 401 on `/dev`, 
 ## Requirements
 
 - Host: Docker with the compose plugin, Node 22 or later, `sudo`, and a user in the `docker` group.
-- Host: `flock` from util-linux. The factories on one host share their machine slots through an `flock` lock.
+- Host: `flock` from util-linux. The factories on one host share their machine slots through `flock` locks, one for each machine and one for the pick.
+- Worker machine: Linux Docker with the `DOCKER-USER` iptables chain, and `sudo`. Docker Desktop does not work. The factory host reaches it with `ssh`, so the orchestrator user needs an ssh key.
 - Project: `gh` for `--labels`. `init-project.sh` copies the skills and agent scripts from a clone at `../cohort-005-project`. The clone needs the `live-run-through` branch.
 - Each project needs `npm i -D @ai-hero/sandcastle@^0.14 tsx zod@^3.25`. The agent scripts import all three.
 - `sf`: Node 22 or later, `gh` signed in, and `claude`.
@@ -294,13 +297,14 @@ Tested on 2026-11-16 with Caddy 2.11 and Chrome: Inngest answers 401 on `/dev`, 
 - Explore reads at most 100 labelled issues in one run. The rest keep `agent:explore` and wait for the next run.
 - All factories share the run network `factory-net`. An agent of one factory can reach a server that an agent of another factory started. Give each factory its own `RUNNER_NETWORK` before a factory serves a public repo.
 - The slots of a machine are one cap for every factory on it, with no fair share. One factory can hold every slot. A run waits up to 2 hours for a slot on its machine, even when another machine has a free slot.
-- A run container gets 4 CPUs and 8 GB of memory. Set `RUNNER_CPUS` and `RUNNER_MEMORY` in a factory env file to change the limits of that factory. Nothing checks that `FACTORY_SLOTS` runs fit in the memory of the host. When a run passes its limit, the kernel stops one process in the container, and the run fails with an unclear message.
+- A run container gets 4 CPUs and 8 GB of memory. Set `RUNNER_CPUS` and `RUNNER_MEMORY` in a factory env file to change the limits of that factory. Nothing checks that the slots of a machine fit in its memory. When a run passes its limit, the kernel stops one process in the container, and the run fails with an unclear message.
 - To find the memory that a project needs, run its setup and its check in the runner image with `--memory <limit> --memory-swap <limit>`. The check must pass, and `/sys/fs/cgroup/memory.events` in the container must show `oom_kill 0`. Do not read `memory.peak` for this: it includes the file cache, and the file cache fills the limit.
 - The prototype task posts screenshots and a draft PR. It does not deploy a preview you can click. To try it, check out the PR and follow `prototypes/issue-<n>/README.md`.
 - `init-project.sh` adds the `prototype-needed` verdict only to explore files it creates. In an existing copy, add it to the enum in `.sandcastle/agent-workflows/explore/plan-schema.ts` yourself.
 - The bundled `decompose-prompt.md` names the files and tables of the sample app it came from. Rewrite it for your project before the night shift writes tickets for you.
 - The night shift has no review per ticket. Review reads the whole spec PR. Keep night-shift specs small: the decomposer writes 12 tickets at most.
-- The runner image is about 3.2 GB, because it holds Chrome for screenshots.
+- The runner image is about 3.2 GB, because it holds Chrome for screenshots, or Chromium on arm64.
+- The runner image holds [rtk](https://github.com/rtk-ai/rtk). A hook gives each Bash call of the agent to rtk, which shortens the output of commands like git, npm and grep. An image without rtk skips the hook.
 - Review refuses PRs whose head is the base or default branch, and branch names outside `A-Z a-z 0-9 . _ / -`. It labels them `agent:blocked` with a comment. Rebase skips the same PRs.
 - `sf` reads blocking edges from each ticket's `## Blocked by` section, and from GitHub's dependency API every 5 minutes.
 - The agent view reads the last 200 lines of each agent log. A run with much Sandcastle output between the activity lines shows fewer finished calls.
