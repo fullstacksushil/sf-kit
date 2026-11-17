@@ -55,18 +55,13 @@ flowchart BT
 
 The course shows good results as the tip of an iceberg. Under the water are three layers: how models work, how harnesses work, and the environment of your agent. You choose the model and the harness. sf-kit builds the third layer.
 
-```mermaid
-flowchart TB
-    tip["Great, reliable, predictable results"]
-    models["How models work"]
-    harness["How harnesses work"]
-    env["Your agent's environment<br/><i>sf-kit: runner image, hooks, checks, tickets</i>"]
-    tip ~~~ models ~~~ harness ~~~ env
-    style tip fill:#f9d65c,stroke:#333,color:#000
-    style models fill:#f3efe6,stroke:#333,color:#000
-    style harness fill:#e8e1d3,stroke:#333,color:#000
-    style env fill:#d9d0c1,stroke:#333,color:#000
-```
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://res.cloudinary.com/total-typescript/image/upload/v1786640503/workshops/ai-coding-crash-course/iceberg-dark.png">
+    <img width="360" alt="Iceberg: great, reliable, predictable results above the waterline. Below it: how models work, how harnesses work, and your agent's environment." src="https://res.cloudinary.com/total-typescript/image/upload/v1786640502/workshops/ai-coding-crash-course/iceberg-light.png">
+  </picture>
+  <br><sub>Image: Matt Pocock, <a href="https://www.aihero.dev/cohorts/software-factories-for-real-engineers-xdy1m">AI Hero</a>.</sub>
+</p>
 
 Each agent starts in the same environment. It gets the runner image with a browser and rtk, an activity hook and your pre-commit checks. Its ticket ends with its parent spec.
 
